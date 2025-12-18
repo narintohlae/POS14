@@ -2483,35 +2483,64 @@ showProductEditorModal(product) {
 },
     hideProductEditorModal() { document.getElementById('product-editor-modal').style.display = 'none';
     },
-    renderProductList(filterText = '') {
-        const container = document.getElementById('product-list-container');
-        const lowercasedFilter = filterText.toLowerCase().trim();
-        let productsToRender = this.state.productsFromFirestore;
-        if (lowercasedFilter) {
-            productsToRender = this.state.productsFromFirestore.filter(p => 
-                (p.productName && p.productName.toLowerCase().includes(lowercasedFilter)) ||
-                (p.productCode && p.productCode.toLowerCase().includes(lowercasedFilter)) ||
-                (p.category && p.category.toLowerCase().includes(lowercasedFilter))
-            );
+renderProducts(products) {
+    const container = document.getElementById('search-results');
+    container.innerHTML = '';
+    
+    if (products.length === 0) {
+        container.classList.remove('has-results');
+        return;
+    }
+    
+    container.classList.add('has-results');
+
+    products.forEach((product, index) => {
+        const item = document.createElement('div');
+        item.className = 'search-item';
+        // เพิ่ม onclick ให้เลือกสินค้า (Default หน่วยแรก)
+        item.onclick = (e) => {
+            // ป้องกันการกดซ้อนกับปุ่มเลือกหน่วย
+            if(e.target.tagName === 'BUTTON') return;
+            this.addToCart(product, 0); 
+        };
+
+        // สร้างปุ่มเลือกหน่วย (Loop สร้างปุ่มตามจำนวนหน่วยที่มี)
+        let unitButtonsHtml = '';
+        if (product.pricingUnits && product.pricingUnits.length > 0) {
+            unitButtonsHtml = '<div style="display:flex; gap:5px; margin-top:5px;">';
+            product.pricingUnits.forEach((u, uIndex) => {
+                // --- ส่วนที่แก้ไข: เพิ่มการแสดง (x ตัวคูณ) ---
+                const factorDisplay = (u.conversionFactor && u.conversionFactor > 1) 
+                    ? `<span style="font-size:0.8em; opacity:0.8; margin-left:2px;">(x${u.conversionFactor})</span>` 
+                    : '';
+                
+                unitButtonsHtml += `
+                    <button onclick="window.POS_APP.addToCart(window.POS_APP.state.products.find(p => p.productCode === '${product.productCode}'), ${uIndex})" 
+                            style="padding: 2px 8px; font-size: 0.85em; height: auto;">
+                        ${u.unitName} ${factorDisplay}
+                    </button>
+                `;
+            });
+            unitButtonsHtml += '</div>';
         }
-        const totalItems = productsToRender.length;
-        const startIndex = (this.state.productListPage - 1) * this.state.productsPerPage;
-        const endIndex = startIndex + this.state.productsPerPage;
-        const paginatedItems = productsToRender.slice(startIndex, endIndex);
-        if (totalItems === 0) {
-             if (lowercasedFilter) {
-                 container.innerHTML = '<p style="text-align:center; padding: 2rem;">ไม่พบสินค้าที่ตรงกับคำค้นหา</p>';
-        } else {
-                 container.innerHTML = '<p style="text-align:center; padding: 2rem;">ยังไม่มีสินค้าในระบบ, กด "เพิ่มสินค้าใหม่" หรือ "นำเข้าข้อมูล" เพื่อเริ่มต้น</p>';
-        }
-             this.renderPaginationControls(0);
-             return;
-        }
-        const headerHTML = `<div class="product-list-row product-list-header"><span>ชื่อสินค้า (รหัส)</span><span>สต็อก</span><span>หน่วยราคา</span><span>การกระทำ</span></div>`;
-        const rowsHTML = paginatedItems.map(p => `<div class="product-list-row"><div><strong>${p.productName}</strong><div class="sub-text">${p.productCode || ''}</div><div class="sub-text">${p.category || 'ไม่มีหมวดหมู่'}</div></div><div class="sub-text">${p.stockInBaseUnits} ${p.baseUnit}</div><div class="sub-text">${(p.pricingUnits || []).map(u => `${u.unitName} (${this.calculateItemTotal(u, 1)}฿)`).join(', ')}</div><div><button type="button" class="edit-history-btn" data-action="edit" data-id="${p.id}">แก้ไข</button><button type="button" class="delete-history-btn" data-action="delete" data-id="${p.id}">ลบ</button></div></div>`).join('');
-        container.innerHTML = headerHTML + rowsHTML;
-        this.renderPaginationControls(totalItems);
-    },
+
+        // แสดงผลรายการสินค้า
+        const priceDisplay = product.pricingUnits[0] ? this.formatCurrency(product.pricingUnits[0].defaultPrice) : '-';
+        
+        item.innerHTML = `
+            <div style="flex-grow:1;">
+                <div style="font-weight:bold;">${this.highlightText(product.productName, this.state.searchQuery)}</div>
+                <div class="sub-text">
+                    รหัส: ${this.highlightText(product.productCode, this.state.searchQuery)} | 
+                    คงเหลือ: ${product.stockInBaseUnits || 0} ${product.baseUnit || ''}
+                </div>
+                ${unitButtonsHtml}
+            </div>
+            <div class="price">${priceDisplay}</div>
+        `;
+        container.appendChild(item);
+    });
+},
     renderPaginationControls(totalItems) {
         const paginationContainer = document.getElementById('product-list-pagination');
         if (!paginationContainer) return;
@@ -2705,21 +2734,43 @@ showProductEditorModal(product) {
     escapeRegex(string) { return string.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'); },
     escapeHtml(string) { const p = document.createElement("p");
     p.textContent = string; return p.innerHTML; },
-    addToCart(productUnit, quantityToAdd = 1) { 
-        if (productUnit && (productUnit.suspended || (productUnit.product && productUnit.product.suspended))) { this.showInfoModal('ระงับการขาย', 'สินค้านี้ถูกระงับการขาย ไม่สามารถเพิ่มเข้าตะกร้าได้', true); return; }
-        const cart = this.getActiveCart();
-        if (!cart) return; 
-        const cartItemId = productUnit.barcode || `${productUnit.productId}-${productUnit.pricingUnit.unitName}`; 
-        const existingProduct = cart.find(item => item.cartItemId === cartItemId);
-        if (existingProduct) { 
-            existingProduct.quantity += quantityToAdd; 
-            delete existingProduct.priceOverride;
-        } else { 
-            const newItem = { cartItemId: cartItemId, productUnit: productUnit, quantity: quantityToAdd };
-            cart.push(newItem); 
-        } 
-        this.updateCartDisplay();
-    },
+addToCart(product, unitIndex = 0) {
+    if (!product || !product.pricingUnits || !product.pricingUnits[unitIndex]) return;
+
+    const unit = product.pricingUnits[unitIndex];
+    
+    // ตรวจสอบสต็อก (ถ้าต้องการแจ้งเตือนสต็อกหมด ให้เปิดคอมเมนต์บรรทัดล่าง)
+    // if (product.stockInBaseUnits <= 0) { alert('สินค้าหมด'); return; }
+
+    const existingItemIndex = this.cart.findIndex(item => 
+        item.productCode === product.productCode && 
+        item.unitName === unit.unitName &&
+        item.price === unit.defaultPrice // แยกรายการถ้าราคาไม่เท่ากัน (เช่นมีส่วนลด)
+    );
+
+    if (existingItemIndex > -1) {
+        this.cart[existingItemIndex].qty++;
+    } else {
+        this.cart.push({
+            productCode: product.productCode,
+            productName: product.productName,
+            unitName: unit.unitName,
+            price: unit.defaultPrice,
+            qty: 1,
+            // --- ส่วนที่แก้ไข: บันทึกตัวคูณลงตะกร้า ---
+            conversionFactor: unit.conversionFactor || 1, 
+            cost: unit.cost || 0,
+            productRef: product // เก็บ reference ไว้ใช้อัปเดต UI หรือตัดสต็อกแบบละเอียด
+        });
+    }
+
+    this.renderCart();
+    this.playBeep(); // ถ้ามีเสียง
+    
+    // เคลียร์ช่องค้นหาเพื่อให้ขายต่อได้เลย (Option)
+    // document.getElementById('search-input').value = '';
+    // document.getElementById('search-input').focus();
+},
     
     // [NEW] Functions to show and hide the promotion tooltip
     showPromotionTooltip(event) {
@@ -4444,6 +4495,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
 
