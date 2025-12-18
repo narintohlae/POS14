@@ -2066,6 +2066,9 @@ async importFromGoogleSheet(isAutomatic = false) {
             const sheetStock = row['คงเหลือ'] !== undefined && row['คงเหลือ'] !== "" ? parseInt(row['คงเหลือ'], 10) : NaN;
             const barcode = row['บาร์โค้ด'] ? String(row['บาร์โค้ด']).trim() : '';
 
+            // [จุดแก้ไขที่ 1] อ่านค่าตัวคูณ (เทียบกับหน่วยเล็ก) ถ้าไม่มีให้เป็น 1
+            const sheetRatio = row['ตัวคูณ (เทียบกับหน่วยเล็ก)'] ? parseFloat(row['ตัวคูณ (เทียบกับหน่วยเล็ก)']) : 1;
+
             // สร้าง Tier Pricing สำหรับหน่วยหลัก
             const baseUnitTiers = getPriceTiers(row, sheetPrice);
 
@@ -2087,34 +2090,32 @@ async importFromGoogleSheet(isAutomatic = false) {
                     if (!isNaN(sheetCost)) updatedPricingUnits[0].cost = sheetCost;
                     if (!isNaN(sheetPrice)) updatedPricingUnits[0].defaultPrice = sheetPrice;
                     
-                    // [สำคัญ] อัปเดตราคาส่งของหน่วยหลัก
+                    // [จุดแก้ไขที่ 2] อัปเดตตัวคูณของหน่วยหลัก
+                    updatedPricingUnits[0].conversionFactor = sheetRatio;
+
+                    // อัปเดตราคาส่งของหน่วยหลัก
                     if (baseUnitTiers.length > 1 || !isNaN(sheetPrice)) {
-                         // ถ้าใน Excel มีระบุราคาส่งมา หรือมีการเปลี่ยนราคาหลัก ให้ใช้ Tiers ชุดใหม่เลย
-                         // แต่ถ้า Excel ไม่ได้ใส่ราคาส่งมา (มีแค่ราคาปกติ) ให้ระวังอย่าไปลบ Tiers เดิมทิ้งหากไม่ได้ตั้งใจ
-                         // ในที่นี้สมมติว่าถ้า Excel มีข้อมูล ให้ทับเลย
                          updatedPricingUnits[0].priceTiers = baseUnitTiers;
                     }
                 }
 
-                // อัปเดตหน่วยย่อยอื่นๆ ตามตรรกะเดิม (ขอละไว้เพื่อให้สั้นลง ใช้ Logic เดิมจากคำตอบก่อนหน้าได้เลย)
-                 // ... (แทรก Logic การ loop extraUnits จากคำตอบก่อนหน้าตรงนี้) ...
-                 // เพื่อความสมบูรณ์ ผมใส่แบบย่อให้:
-                 extraUnits.forEach(ex => {
-                    const newUnit = createUnitObject(ex.name, ex.barcode, ex.qty, ex.price, sheetCost);
-                    const idx = updatedPricingUnits.findIndex(u => u.unitName === newUnit.unitName);
-                    if (idx > -1) {
-                         // อัปเดต
-                         updatedPricingUnits[idx].conversionFactor = newUnit.conversionFactor;
-                         updatedPricingUnits[idx].barcode = newUnit.barcode;
-                         if(!isNaN(sheetCost)) updatedPricingUnits[idx].cost = newUnit.cost;
-                         if(ex.price) {
-                             updatedPricingUnits[idx].defaultPrice = newUnit.defaultPrice;
-                             updatedPricingUnits[idx].priceTiers = newUnit.priceTiers;
-                         }
-                    } else {
-                        updatedPricingUnits.push(newUnit);
-                    }
-                 });
+                // อัปเดตหน่วยย่อยอื่นๆ
+                extraUnits.forEach(ex => {
+                   const newUnit = createUnitObject(ex.name, ex.barcode, ex.qty, ex.price, sheetCost);
+                   const idx = updatedPricingUnits.findIndex(u => u.unitName === newUnit.unitName);
+                   if (idx > -1) {
+                        // อัปเดต
+                        updatedPricingUnits[idx].conversionFactor = newUnit.conversionFactor;
+                        updatedPricingUnits[idx].barcode = newUnit.barcode;
+                        if(!isNaN(sheetCost)) updatedPricingUnits[idx].cost = newUnit.cost;
+                        if(ex.price) {
+                            updatedPricingUnits[idx].defaultPrice = newUnit.defaultPrice;
+                            updatedPricingUnits[idx].priceTiers = newUnit.priceTiers;
+                        }
+                   } else {
+                       updatedPricingUnits.push(newUnit);
+                   }
+                });
 
 
                 batch.update(docRef, {
@@ -2137,9 +2138,10 @@ async importFromGoogleSheet(isAutomatic = false) {
                     unitName: sheetUnit,
                     barcode: barcode,
                     cost: finalCost,
-                    conversionFactor: 1,
+                    // [จุดแก้ไขที่ 3] ใช้ค่าตัวคูณจาก Excel สำหรับสินค้าใหม่
+                    conversionFactor: sheetRatio, 
                     defaultPrice: finalPrice,
-                    priceTiers: baseUnitTiers // ใส่ Tiers ที่ดึงมา
+                    priceTiers: baseUnitTiers 
                 }];
 
                 // เพิ่มหน่วยย่อย
@@ -4442,6 +4444,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
 
