@@ -1946,7 +1946,7 @@ const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().get
 
                 if (this.state.lastSheetHash && this.state.lastSheetHash !== currentHash) {
                     console.log('Auto-Import: Detected changes. Importing...');
-                    this.showInfoModal('อัปเดตอัตโนมัติ', 'ตรวจพบการเปลี่ยนแปลงใน Google Script กำลังนำเข้าข้อมูล...');
+                    // this.showInfoModal('อัปเดตอัตโนมัติ', 'ตรวจพบการเปลี่ยนแปลงใน Google Script กำลังนำเข้าข้อมูล...');
                   
                   this.importFromGoogleSheet(true);
                 } else if (!this.state.lastSheetHash) {
@@ -4442,5 +4442,6 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
