@@ -2356,71 +2356,129 @@ showProductMgmtModal() {
     },
     hideProductMgmtModal() { document.getElementById('product-mgmt-modal').style.display = 'none';
     },
-showProductEditorModal: function(product) {
-    const modal = document.getElementById('product-editor-modal');
-    if (!modal) return;
-    
-    // แสดง Modal
-    modal.style.display = 'flex';
+showProductEditorModal(product) {
+    this.state.currentEditingProductId = product ? product.id : null;
+    const titleEl = document.getElementById('product-editor-title');
+    if (titleEl) titleEl.textContent = product ? 'แก้ไขสินค้า' : 'เพิ่มสินค้าใหม่';
 
-    // ============================================================
-    // [START] ระบบคำนวณต้นทุนอัตโนมัติ (Re-calculate Costs)
-    // ============================================================
-    // ทำงานเมื่อมีการเปิดแก้ไขสินค้า และสินค้านั้นมีหน่วยนับ
-    if (product && Array.isArray(product.pricingUnits) && product.pricingUnits.length > 0) {
-        
-        // 1. หา "หน่วยตั้งต้น" (Base Unit) ที่ Ratio = 1
-        // ถ้าไม่มีให้ใช้หน่วยแรกสุดเป็นตัวหลัก
-        let baseUnit = product.pricingUnits.find(u => parseFloat(u.ratio) === 1);
-        if (!baseUnit) baseUnit = product.pricingUnits[0];
+    // Helper function เพื่อลดการเขียนโค้ดซ้ำ
+    const setValue = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.value = value;
+    };
+    const setChecked = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.checked = value;
+    };
 
-        // 2. ดึงราคาต้นทุนของหน่วยตั้งต้นมาเป็น "แม่แบบ"
-        const baseCost = parseFloat(baseUnit.cost || 0);
-
-        // 3. วนลูปคำนวณต้นทุนใหม่ให้ "ทุกหน่วย" (รวมถึงตัวมันเองด้วย)
-        // สูตร: ต้นทุน = ต้นทุนหน่วยตั้งต้น x จำนวนบรรจุ (Ratio)
-        product.pricingUnits.forEach(unit => {
-            const ratio = parseFloat(unit.ratio || 1);
-            const newCost = baseCost * ratio;
-            
-            // อัปเดตค่า cost ใน object สินค้าทันที
-            // .toFixed(2) เพื่อปัดเศษทศนิยม 2 ตำแหน่ง
-            unit.cost = parseFloat(newCost.toFixed(2));
-        });
-        
-        console.log(`[Auto-Cal Cost] Base Cost: ${baseCost}, Recalculated for ${product.pricingUnits.length} units.`);
-    }
-    // ============================================================
-    // [END] จบส่วนคำนวณ
-    // ============================================================
-
-
-    // --- ส่วนการแสดงผลข้อมูลลงใน Form (Original Logic) ---
-    
-    // 1. เคลียร์ข้อมูลเก่าและใส่ข้อมูลสินค้า
-    document.getElementById('product-code').value = product ? product.productCode : '';
-    document.getElementById('product-name').value = product ? product.productName : '';
-    document.getElementById('product-category').value = product ? (product.category || '') : '';
-    document.getElementById('product-base-unit').value = product ? (product.baseUnit || '') : '';
-
-    // 2. เคลียร์รายการหน่วยนับเก่าในหน้าจอ
+    // เคลียร์ Container ของหน่วยสินค้าก่อน
     const container = document.getElementById('pricing-units-container');
-    container.innerHTML = '';
+    if (container) container.innerHTML = '';
 
-    // 3. สร้างรายการหน่วยนับ (ที่คำนวณต้นทุนใหม่แล้ว) ลงในหน้าจอ
-    if (product && product.pricingUnits) {
-        product.pricingUnits.forEach(unit => {
-            this.addPricingUnitToModal(unit); 
-            // หมายเหตุ: ฟังก์ชัน addPricingUnitToModal จะดึงค่า unit.cost ที่เราเพิ่งคำนวณไปแสดงผล
-        });
+    if (product) {
+        // กรณีแก้ไข: ดึงข้อมูลเดิมมาใส่
+        setValue('product-code', product.productCode || '');
+        setValue('product-name', product.productName || '');
+        setValue('product-category', product.category || '');
+        setValue('product-base-unit', product.baseUnit || '');
+        setValue('product-stock', product.stockInBaseUnits || 0);
+        setChecked('product-suspended', !!product.suspended);
+
+        // วนลูปสร้างหน่วยสินค้า
+        if (product.pricingUnits && product.pricingUnits.length > 0) {
+            product.pricingUnits.forEach(unit => this.addPricingUnitRow(unit));
+        } else {
+            this.addPricingUnitRow();
+        }
     } else {
-        // กรณีเพิ่มสินค้าใหม่ ให้สร้างแถวเปล่าๆ 1 แถว
-        this.addPricingUnitToModal();
+        // กรณีเพิ่มใหม่: ล้างค่าทั้งหมด
+        setValue('product-code', '');
+        setValue('product-name', '');
+        setValue('product-category', '');
+        setValue('product-base-unit', '');
+        setValue('product-stock', '0');
+        setChecked('product-suspended', false);
+        this.addPricingUnitRow();
     }
 
-    // เก็บตัวแปรสินค้าที่กำลังแก้ไขไว้ใช้งานตอนกดบันทึก
-    this.currentEditingProduct = product;
-  },
+    // แสดง Modal
+    const modal = document.getElementById('product-editor-modal');
+    if (modal) modal.style.display = 'flex';
+
+    // ============================================================
+    // [START] ระบบคำนวณต้นทุนอัตโนมัติ (Dynamic Cost Calculation)
+    // ============================================================
+    
+    // ตัวแปรเก็บ "ต้นทุนต่อ 1 หน่วยเล็ก" (Base Price Per Unit)
+    let basePricePerUnit = 0;
+
+    // ฟังก์ชันสำหรับหาค่าต้นทุนมาตรฐานจากบรรทัดแรก (Row 0)
+    const updateBasePriceFromFirstRow = () => {
+        const firstCard = container.querySelector('.pricing-unit-card');
+        if (firstCard) {
+            const cost = parseFloat(firstCard.querySelector('input[data-field="cost"]').value) || 0;
+            const factor = parseFloat(firstCard.querySelector('input[data-field="conversionFactor"]').value) || 1;
+            // คำนวณหาต้นทุนต่อ 1 หน่วย (ถ้าตัวคูณเป็น 0 ให้เลี่ยง Error หารด้วยศูนย์)
+            basePricePerUnit = factor !== 0 ? (cost / factor) : 0;
+        }
+    };
+
+    // เรียกครั้งแรกตอนเปิด Modal เพื่อจำค่าเริ่มต้น
+    updateBasePriceFromFirstRow();
+
+    // สร้าง Event Listener แบบ Delegation ที่ Container
+    container.oninput = (e) => {
+        const target = e.target;
+        // สนใจเฉพาะ input ที่อยู่ใน Card
+        if (!target.matches('input')) return;
+        
+        const card = target.closest('.pricing-unit-card');
+        if (!card) return;
+
+        const allCards = Array.from(container.querySelectorAll('.pricing-unit-card'));
+        const index = allCards.indexOf(card);
+        const isBaseRow = (index === 0); // ตรวจสอบว่าเป็นบรรทัดแรกหรือไม่
+        const field = target.dataset.field;
+
+        // กรณีที่ 1: มีการแก้ไข "ต้นทุน" ของบรรทัดแรก (หน่วยหลัก)
+        if (isBaseRow && field === 'cost') {
+            // อัปเดตค่ามาตรฐาน (Base Price Per Unit) ใหม่
+            updateBasePriceFromFirstRow();
+
+            // สั่งคำนวณต้นทุนของบรรทัดอื่นๆ ใหม่ทั้งหมด
+            allCards.forEach((c, i) => {
+                if (i === 0) return; // ข้ามตัวเอง
+                const factorInput = c.querySelector('input[data-field="conversionFactor"]');
+                const costInput = c.querySelector('input[data-field="cost"]');
+                
+                if (factorInput && costInput) {
+                    const factor = parseFloat(factorInput.value) || 1;
+                    // สูตร: ต้นทุน = (ราคาต่อหน่วยเล็ก * ตัวคูณ)
+                    costInput.value = (basePricePerUnit * factor).toFixed(2);
+                }
+            });
+        }
+
+        // กรณีที่ 2: มีการแก้ไข "ตัวคูณ" (ของบรรทัดใดก็ตาม รวมถึงบรรทัดแรก)
+        else if (field === 'conversionFactor') {
+            const newFactor = parseFloat(target.value) || 1;
+            const costInput = card.querySelector('input[data-field="cost"]');
+            
+            if (costInput) {
+                // คำนวณต้นทุนใหม่โดยอิงจากค่ามาตรฐานเดิม
+                // สูตร: ต้นทุนใหม่ = ราคาต่อหน่วยเล็ก (ที่จำไว้) * ตัวคูณใหม่
+                costInput.value = (basePricePerUnit * newFactor).toFixed(2);
+                
+                // หากเป็นการแก้ตัวคูณของบรรทัดแรก -> ค่า Base Price Per Unit ยังคงเดิม (เพราะเรายึดตามหลักการว่า Row 0 คือตัวกำหนด Base Price)
+                // แต่ถ้าคุณต้องการให้การเปลี่ยนตัวคูณบรรทัดแรก ไปเปลี่ยนค่า Base Price Per Unit ด้วย (ซึ่งซับซ้อนและอาจสับสน) ก็ต้องเรียก updateBasePriceFromFirstRow() ที่นี่
+                // แต่ตาม Logic ทั่วไป: เปลี่ยนตัวคูณ -> ราคาเปลี่ยน (ถูกต้องแล้วตามโจทย์ "Cost/Unit = 100 Multiplier = 10")
+            }
+        }
+    };
+    // ============================================================
+    // [END] ระบบคำนวณต้นทุนอัตโนมัติ
+    // ============================================================
+},
     hideProductEditorModal() { document.getElementById('product-editor-modal').style.display = 'none';
     },
     renderProductList(filterText = '') {
@@ -4384,7 +4442,5 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
-
-
 
 
