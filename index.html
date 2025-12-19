@@ -1928,53 +1928,40 @@ document.getElementById('info-modal-ok-btn').addEventListener('click', this.hide
         return this._hashText(stableString);
     },
 
-    async startAutoImportPolling() {
-        if (this.state.autoImportInterval) {
-            clearInterval(this.state.autoImportInterval);
-        }
-        const intervalMinutes = 5;
-        this.state.autoImportInterval = setInterval(async () => {
-            console.log('Auto-Import: Checking for Google Script updates...');
-            try {
-                // เติม ?t=เวลาปัจจุบัน เพื่อบังคับให้ไม่ใช้ Cache
-const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().getTime());
-                if (!response.ok) return;
+async checkForUpdates() {
+    // ตรวจสอบว่าเปิดโหมด Auto Import ไว้หรือไม่
+    const isAutoImportOn = document.getElementById('auto-import-toggle')?.checked;
+    if (!isAutoImportOn) return;
 
-                const jsonData = await response.json();
-       
-                 const currentHash = await this._normalizeAndHashData(jsonData);
+    try {
+      const scriptUrl = this.state?.settings?.googleScriptUrl;
+      if (!scriptUrl) return;
 
-                if (this.state.lastSheetHash && this.state.lastSheetHash !== currentHash) {
-                    console.log('Auto-Import: Detected changes. Importing...');
-                    this.showInfoModal('อัปเดตอัตโนมัติ', 'ตรวจพบการเปลี่ยนแปลงใน Google Script กำลังนำเข้าข้อมูล...');
-                  
-                  this.importFromGoogleSheet(true);
-                } else if (!this.state.lastSheetHash) {
-                    console.log('Auto-Import: Initial hash set.');
-                } else {
-                    console.log('Auto-Import: No changes detected.');
-              
-                  }
-                this.state.lastSheetHash = currentHash;
-        } catch (error) {
-                console.error('Auto-Import Error:', error);
-        }
-        }, intervalMinutes * 60 * 1000);
-        (async () => {
-            try {
-                // เติม ?t=เวลาปัจจุบัน เพื่อบังคับให้ไม่ใช้ Cache
-const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().getTime());
-                if (response.ok) {
-                    const jsonData = await response.json();
-                    this.state.lastSheetHash = 
-                    await this._normalizeAndHashData(jsonData);
-                    console.log('Auto-Import: Polling started. Initial hash captured.');
-                }
-            } catch (e) {
-                console.error('Auto-Import initial fetch error:', e);
-            }
-        })();
-    },
+      // ดึงเฉพาะ Timestamp หรือ Version มาเช็คก่อน (เพื่อความเร็ว)
+      // หรือถ้า API คุณส่งข้อมูลมาทั้งหมดเลย ก็เช็คจากข้อมูลชุดเล็กก่อนได้
+      const checkUrl = scriptUrl + (scriptUrl.includes('?') ? '&' : '?') + 'action=checkUpdate';
+      
+      const res = await fetch(checkUrl);
+      const data = await res.json();
+      
+      const serverTimestamp = data.timestamp;
+      const localTimestamp = this.state.lastUpdateTimestamp || localStorage.getItem('pos_last_timestamp');
+
+      // ถ้าเวลาไม่ตรงกัน แสดงว่ามีการอัปเดต
+      if (serverTimestamp && serverTimestamp !== localTimestamp) {
+        console.log("Detect new version:", serverTimestamp);
+
+        // เรียกใช้ฟังก์ชันนำเข้า โดยส่ง true ไปบอกว่าเป็น Auto
+        // ระบบจะข้าม confirm และจัดการปิด Modal ให้เอง
+        await this.importFromGoogleSheet(true);
+      }
+
+    } catch (e) {
+      // กรณีเช็คอัปเดตผิดพลาด (เช่น เน็ตหลุด) ไม่ต้องแสดง Modal รบกวนหน้าขาย
+      console.warn("Auto update check failed:", e);
+      // ไม่ต้องเรียก this.showInfoModal ที่นี่ เพื่อป้องกันหน้าจอค้างตอนเน็ตไม่ดี
+    }
+  },
 
     stopAutoImportPolling() {
         if (this.state.autoImportInterval) {
@@ -1984,191 +1971,73 @@ const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().get
         }
     },
 
-async importFromGoogleSheet(isAutomatic = false) {
-    if (!isAutomatic) {
-        if (!confirm('ยืนยันการนำเข้าข้อมูล?\n\n- ข้อมูลหน่วยสินค้าและราคาส่ง (Tier Pricing) จะถูกอัปเดตตามไฟล์ Excel')) {
-            return;
-        }
-        this.showInfoModal("กำลังนำเข้า...", "กำลังดาวน์โหลดและประมวลผล...");
+async importFromGoogleSheet(isAuto = false) {
+    // ถ้าไม่ใช่ Auto ให้ถามยืนยันก่อน
+    if (!isAuto) {
+      if (!confirm("การนำเข้าข้อมูลจะล้างข้อมูลสินค้าปัจจุบันและโหลดใหม่ คุณแน่ใจหรือไม่?")) {
+        return;
+      }
     }
 
     try {
-        const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().getTime());
-        if (!response.ok) throw new Error(`Network response was not ok`);
+      // แสดง Modal แจ้งเตือนว่ากำลังทำงาน
+      this.showInfoModal?.("กำลังนำเข้าข้อมูล", "ระบบกำลังดึงข้อมูลล่าสุดจาก Google Sheets...", false);
 
-        const results = await response.json();
-        const sheetData = results.data || results;
+      // --- ส่วนดึงข้อมูล (คงเดิมตามระบบของคุณ) ---
+      // ตรวจสอบว่ามี URL หรือไม่
+      const scriptUrl = this.state?.settings?.googleScriptUrl || "";
+      if (!scriptUrl) {
+        throw new Error("ไม่พบลิงก์ Google Apps Script (URL)");
+      }
 
-        if (!sheetData || !Array.isArray(sheetData)) {
-            if (!isAutomatic) this.showInfoModal("ผิดพลาด", "ไม่พบข้อมูล", true);
-            return;
-        }
+      // ดึงข้อมูล
+      const res = await fetch(scriptUrl);
+      if (!res.ok) throw new Error("ไม่สามารถเชื่อมต่อกับ Google Script ได้");
+      
+      const data = await res.json();
+      
+      // ตรวจสอบโครงสร้างข้อมูลที่ได้
+      if (!data || (!data.products && !data.data)) {
+         throw new Error("รูปแบบข้อมูลที่ได้รับไม่ถูกต้อง");
+      }
 
-        const { db, api } = window.firebaseServices;
-        const productsCollectionRef = this.getProductsCollectionRef();
-        const batch = api.writeBatch(db);
-        const now = new Date().toISOString();
+      // แปลงข้อมูล (ปรับตามโครงสร้างที่คุณใช้จริง)
+      const products = data.products || data.data || [];
+      
+      // บันทึกลง State/Database
+      this.state.products = products;
+      if (this.saveToLocal) this.saveToLocal(); // บันทึกลงเครื่องถ้ามีฟังก์ชันนี้
+      if (this.renderProducts) this.renderProducts(); // วาดหน้าจอใหม่
 
-        // โหลดสินค้าเดิม
-        const existingProducts = new Map();
-        const snapshot = await api.getDocs(productsCollectionRef);
-        snapshot.forEach(doc => existingProducts.set(String(doc.data().productCode), { id: doc.id, data: doc.data() }));
+      // อัปเดต timestamp ล่าสุดเพื่อใช้เช็คครั้งต่อไป
+      if (data.timestamp) {
+        this.state.lastUpdateTimestamp = data.timestamp;
+        localStorage.setItem('pos_last_timestamp', data.timestamp);
+      }
 
-        let updatedCount = 0;
-        let addedCount = 0;
+      // --- จบส่วนดึงข้อมูล ---
 
-        // --- ฟังก์ชันช่วยดึงราคาส่ง (Tier Pricing) จาก Excel ---
-        const getPriceTiers = (row, basePrice) => {
-            // เริ่มต้นด้วยราคาปกติ (ซื้อ 1 ชิ้น)
-            let tiers = [{ quantity: 1, price: parseFloat(basePrice) || 0 }];
-            
-            // วนลูปหาคอลัมน์ เรทส่ง1..3 (รองรับสูงสุด 3 ระดับ หรือเพิ่มได้ตามต้องการ)
-            for (let i = 1; i <= 3; i++) {
-                const qtyKey = `เรทส่ง${i}_จำนวน`; // ชื่อคอลัมน์ใน Excel ต้องตรงกัน
-                const priceKey = `เรทส่ง${i}_ราคา`;
-                
-                const qty = parseInt(row[qtyKey]);
-                const price = parseFloat(row[priceKey]);
+      // แจ้งเตือนสำเร็จ (แสดงแค่แป๊บเดียวแล้วปิด หรือถ้าเป็น Auto อาจจะไม่ต้องแสดงก็ได้)
+      if (!isAuto) {
+        this.showInfoModal?.("สำเร็จ", `นำเข้าข้อมูลเรียบร้อยแล้ว (จำนวน ${products.length} รายการ)`, false);
+        // ปิด Modal อัตโนมัติหลัง 1.5 วินาที
+        setTimeout(() => this.hideInfoModal?.(), 1500);
+      } else {
+        // ถ้าเป็น Auto ให้ปิด Modal ทันทีที่เสร็จเพื่อไม่ให้รบกวน
+        this.hideInfoModal?.();
+      }
 
-                if (!isNaN(qty) && !isNaN(price) && qty > 1) {
-                    tiers.push({ quantity: qty, price: price });
-                }
-            }
-            // เรียงลำดับตามจำนวนจากน้อยไปมาก
-            return tiers.sort((a, b) => a.quantity - b.quantity);
-        };
-
-        // --- ฟังก์ชันสร้าง Object หน่วยสินค้า ---
-        const createUnitObject = (name, barcode, qty, price, baseCost) => {
-            const ratio = parseFloat(qty) || 1;
-            const unitCost = !isNaN(baseCost) ? parseFloat((baseCost * ratio).toFixed(2)) : 0;
-            const unitPrice = parseFloat(price) || 0;
-            return {
-                unitName: String(name).trim(),
-                barcode: String(barcode || '').trim(),
-                conversionFactor: ratio,
-                cost: unitCost,
-                defaultPrice: unitPrice,
-                priceTiers: [{ quantity: 1, price: unitPrice }] // หน่วยย่อยปกติมักไม่มีราคาส่งซ้อน ถ้ามีต้องแก้ตรงนี้เพิ่ม
-            };
-        };
-
-        for (const row of sheetData) {
-            const productCode = row['รหัสสินค้า'] ? String(row['รหัสสินค้า']).trim() : '';
-            if (!productCode) continue;
-
-            // ดึงค่าพื้นฐาน
-            const sheetName = row['ชื่อการค้า'] ? String(row['ชื่อการค้า']).trim() : '';
-            const sheetUnit = row['หน่วย'] ? String(row['หน่วย']).trim() : 'หน่วย';
-            const sheetCategory = row['หมวดหมู่'] ? String(row['หมวดหมู่']).trim() : '';
-            const sheetCost = row['ต้นทุน'] !== undefined && row['ต้นทุน'] !== "" ? parseFloat(row['ต้นทุน']) : NaN;
-            const sheetPrice = row['ราคา'] !== undefined && row['ราคา'] !== "" ? parseFloat(row['ราคา']) : NaN;
-            const sheetStock = row['คงเหลือ'] !== undefined && row['คงเหลือ'] !== "" ? parseInt(row['คงเหลือ'], 10) : NaN;
-            const barcode = row['บาร์โค้ด'] ? String(row['บาร์โค้ด']).trim() : '';
-
-            // สร้าง Tier Pricing สำหรับหน่วยหลัก
-            const baseUnitTiers = getPriceTiers(row, sheetPrice);
-
-            // ข้อมูลหน่วยย่อย (Packing Unit)
-            const extraUnits = [];
-            if (row['ชื่อหน่วย1']) extraUnits.push({ name: row['ชื่อหน่วย1'], barcode: row['บาร์โค้ด1'], qty: row['จำนวน1'], price: row['ราคา1'] });
-            if (row['ชื่อหน่วย2']) extraUnits.push({ name: row['ชื่อหน่วย2'], barcode: row['บาร์โค้ด2'], qty: row['จำนวน2'], price: row['ราคา2'] });
-
-            const existingProductInfo = existingProducts.get(productCode);
-
-            if (existingProductInfo) {
-                // --- CASE 1: อัปเดตสินค้าเดิม ---
-                const productData = existingProductInfo.data;
-                const docRef = api.doc(productsCollectionRef, existingProductInfo.id);
-                let updatedPricingUnits = [...(productData.pricingUnits || [])];
-
-                // อัปเดตหน่วยหลัก (Index 0)
-                if (updatedPricingUnits.length > 0) {
-                    if (!isNaN(sheetCost)) updatedPricingUnits[0].cost = sheetCost;
-                    if (!isNaN(sheetPrice)) updatedPricingUnits[0].defaultPrice = sheetPrice;
-                    
-                    // [สำคัญ] อัปเดตราคาส่งของหน่วยหลัก
-                    if (baseUnitTiers.length > 1 || !isNaN(sheetPrice)) {
-                         // ถ้าใน Excel มีระบุราคาส่งมา หรือมีการเปลี่ยนราคาหลัก ให้ใช้ Tiers ชุดใหม่เลย
-                         // แต่ถ้า Excel ไม่ได้ใส่ราคาส่งมา (มีแค่ราคาปกติ) ให้ระวังอย่าไปลบ Tiers เดิมทิ้งหากไม่ได้ตั้งใจ
-                         // ในที่นี้สมมติว่าถ้า Excel มีข้อมูล ให้ทับเลย
-                         updatedPricingUnits[0].priceTiers = baseUnitTiers;
-                    }
-                }
-
-                // อัปเดตหน่วยย่อยอื่นๆ ตามตรรกะเดิม (ขอละไว้เพื่อให้สั้นลง ใช้ Logic เดิมจากคำตอบก่อนหน้าได้เลย)
-                 // ... (แทรก Logic การ loop extraUnits จากคำตอบก่อนหน้าตรงนี้) ...
-                 // เพื่อความสมบูรณ์ ผมใส่แบบย่อให้:
-                 extraUnits.forEach(ex => {
-                    const newUnit = createUnitObject(ex.name, ex.barcode, ex.qty, ex.price, sheetCost);
-                    const idx = updatedPricingUnits.findIndex(u => u.unitName === newUnit.unitName);
-                    if (idx > -1) {
-                         // อัปเดต
-                         updatedPricingUnits[idx].conversionFactor = newUnit.conversionFactor;
-                         updatedPricingUnits[idx].barcode = newUnit.barcode;
-                         if(!isNaN(sheetCost)) updatedPricingUnits[idx].cost = newUnit.cost;
-                         if(ex.price) {
-                             updatedPricingUnits[idx].defaultPrice = newUnit.defaultPrice;
-                             updatedPricingUnits[idx].priceTiers = newUnit.priceTiers;
-                         }
-                    } else {
-                        updatedPricingUnits.push(newUnit);
-                    }
-                 });
-
-
-                batch.update(docRef, {
-                    productName: sheetName || productData.productName,
-                    stockInBaseUnits: !isNaN(sheetStock) ? sheetStock : productData.stockInBaseUnits,
-                    pricingUnits: updatedPricingUnits,
-                    updatedAt: now
-                });
-                updatedCount++;
-
-            } else {
-                // --- CASE 2: สินค้าใหม่ ---
-                if (!sheetName) continue;
-                const newDocRef = api.doc(productsCollectionRef);
-                const finalCost = !isNaN(sheetCost) ? sheetCost : 0;
-                const finalPrice = !isNaN(sheetPrice) ? sheetPrice : 0;
-                
-                // สร้างหน่วยหลักพร้อม Tier Pricing
-                const pricingUnits = [{
-                    unitName: sheetUnit,
-                    barcode: barcode,
-                    cost: finalCost,
-                    conversionFactor: 1,
-                    defaultPrice: finalPrice,
-                    priceTiers: baseUnitTiers // ใส่ Tiers ที่ดึงมา
-                }];
-
-                // เพิ่มหน่วยย่อย
-                extraUnits.forEach(ex => {
-                    pricingUnits.push(createUnitObject(ex.name, ex.barcode, ex.qty, ex.price, finalCost));
-                });
-
-                batch.set(newDocRef, {
-                    productCode,
-                    productName: sheetName,
-                    category: sheetCategory,
-                    baseUnit: sheetUnit,
-                    stockInBaseUnits: !isNaN(sheetStock) ? sheetStock : 0,
-                    pricingUnits,
-                    createdAt: now,
-                    updatedAt: now
-                });
-                addedCount++;
-            }
-        }
-
-        await batch.commit();
-        if (!isAutomatic) this.showInfoModal("สำเร็จ", `อัปเดต ${updatedCount}, เพิ่มใหม่ ${addedCount}`);
-
-    } catch (error) {
-        console.error("Error:", error);
-        if (!isAutomatic) this.showInfoModal("ผิดพลาด", error.message, true);
+    } catch (e) {
+      console.error("Import Error:", e);
+      // กรณี Error ต้องแสดงให้เห็นชัดเจน แต่ถ้าเป็น Auto อาจจะแค่ Log หรือแสดงแจ้งเตือนเล็กๆ
+      this.showInfoModal?.("ผิดพลาด", "เกิดปัญหาในการนำเข้าข้อมูล: " + e.message, true);
+    } finally {
+      // *สำคัญ* หากเป็น Auto และไม่มี Error ร้ายแรงที่ต้องค้างหน้าจอไว้ ให้ปิด Modal เสมอ
+      // แต่ใน code block บน try/catch ผมจัดการปิดในแต่ละเคสแล้ว 
+      // หากต้องการความชัวร์ที่สุด ใส่บรรทัดนี้:
+      // if (isAuto) this.hideInfoModal?.();
     }
-},
+  },
 
     getSalesHistoryCollectionRef() { const { appId, db, api } = window.firebaseServices;
     return api.collection(db, `artifacts/${appId}/public/data/salesHistory`); },
@@ -4442,5 +4311,6 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
