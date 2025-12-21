@@ -1985,160 +1985,162 @@ const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().get
     },
 
 async importFromGoogleSheet(isAutomatic = false) {
-        if (!isAutomatic) {
-            if (!confirm('คุณต้องการนำเข้าข้อมูลจาก Google Script หรือไม่?\n\nระบบจะใช้ "รหัสสินค้า" เป็นหลักในการตรวจสอบ:\n- สินค้าเดิม: จะถูกอัปเดตข้อมูล ราคา และหน่วยนับตามไฟล์ Excel\n- สินค้าใหม่: เพิ่มข้อมูลตามปกติ')) {
-                return;
-            }
-            this.showInfoModal("กำลังนำเข้า...", "กำลังดาวน์โหลดข้อมูลจาก Google Script กรุณารอสักครู่...");
+    if (!isAutomatic) {
+        if (!confirm('ยืนยันการนำเข้าข้อมูลจาก Google Sheet?\n\nคำเตือน: ระบบจะใช้ "รหัสสินค้า" เป็นเกณฑ์\n- ข้อมูลหน่วยนับและราคาขายทั้งหมด จะถูกแทนที่ด้วยข้อมูลจากไฟล์ Excel\n- สต็อกสินค้าจะถูกอัปเดตเฉพาะรายการที่มีตัวเลขระบุมา')) {
+            return;
+        }
+        this.showInfoModal("กำลังนำเข้า...", "กำลังดาวน์โหลดและประมวลผลข้อมูล...");
+    }
+
+    try {
+        const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().getTime());
+        if (!response.ok) throw new Error(`เชื่อมต่อ Google Sheet ไม่สำเร็จ (Status: ${response.status})`);
+
+        const results = await response.json();
+        const sheetData = results.data || results;
+
+        if (!sheetData || !Array.isArray(sheetData)) {
+            throw new Error("รูปแบบข้อมูลจาก Google Sheet ไม่ถูกต้อง");
         }
 
-        try {
-            const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().getTime());
-            if (!response.ok) throw new Error(`Network response was not ok, status: ${response.status}`);
+        const { db, api } = window.firebaseServices;
+        const productsRef = this.getProductsCollectionRef();
+        const batch = api.writeBatch(db);
+        const now = new Date().toISOString();
 
-            const results = await response.json();
-            const sheetData = results.data || results;
+        // โหลดข้อมูลเดิมเพื่อเทียบรหัสสินค้า
+        const existingDocs = await api.getDocs(productsRef);
+        const existingMap = new Map();
+        existingDocs.forEach(doc => {
+            const d = doc.data();
+            if (d.productCode) existingMap.set(String(d.productCode), doc.id);
+        });
 
-            if (!sheetData || !Array.isArray(sheetData) || sheetData.length === 0) {
-                if (!isAutomatic) this.showInfoModal("ผิดพลาด", "ไม่พบข้อมูลจาก Google Script", true);
-                return;
+        let updatedCount = 0;
+        let addedCount = 0;
+
+        for (const row of sheetData) {
+            // 1. ตรวจสอบรหัสสินค้า (จำเป็นต้องมี)
+            const code = row['รหัสสินค้า'] ? String(row['รหัสสินค้า']).trim() : null;
+            if (!code) continue;
+
+            // 2. เตรียมข้อมูลพื้นฐาน
+            const name = row['ชื่อการค้า'] ? String(row['ชื่อการค้า']).trim() : 'สินค้าไม่มีชื่อ';
+            const cost = parseFloat(row['ต้นทุน']) || 0;
+            const stock = row['คงเหลือ'] !== "" && row['คงเหลือ'] !== undefined ? parseInt(row['คงเหลือ']) : null;
+            
+            // 3. สร้างโครงสร้างหน่วยนับ (Pricing Units)
+            const pricingUnits = [];
+
+            // --- 3.1 หน่วยหลัก (Base Unit) ---
+            const baseUnitName = row['หน่วย'] ? String(row['หน่วย']).trim() : 'ชิ้น';
+            const basePrice = parseFloat(row['ราคา']) || 0;
+            
+            // สร้างระดับราคา (Price Tiers) สำหรับหน่วยหลัก
+            const baseTiers = [{ quantity: 1, price: basePrice }]; // ราคาปกติ (1 ชิ้น)
+            
+            // เพิ่มเรทส่ง (ถ้ามี)
+            if (row['เรทส่ง1_จำนวน'] && row['เรทส่ง1_ราคา']) {
+                baseTiers.push({ 
+                    quantity: parseFloat(row['เรทส่ง1_จำนวน']), 
+                    price: parseFloat(row['เรทส่ง1_ราคา']) 
+                });
             }
+            if (row['เรทส่ง2_จำนวน'] && row['เรทส่ง2_ราคา']) {
+                baseTiers.push({ 
+                    quantity: parseFloat(row['เรทส่ง2_จำนวน']), 
+                    price: parseFloat(row['เรทส่ง2_ราคา']) 
+                });
+            }
+            // เรียงลำดับเรทราคาตามจำนวนน้อยไปมาก
+            baseTiers.sort((a, b) => a.quantity - b.quantity);
 
-            const { db, api } = window.firebaseServices;
-            const productsCollectionRef = this.getProductsCollectionRef();
-
-            if (!isAutomatic) this.showInfoModal("กำลังประมวลผล...", "กำลังตรวจสอบและอัปเดตข้อมูล...");
-
-            // โหลดข้อมูลสินค้าเดิมเพื่อเช็ค ID
-            const existingProducts = new Map();
-            const snapshot = await api.getDocs(productsCollectionRef);
-            snapshot.forEach(doc => {
-                const product = doc.data();
-                if (product.productCode) {
-                    existingProducts.set(String(product.productCode), { id: doc.id, data: product });
-                }
+            pricingUnits.push({
+                unitName: baseUnitName,
+                barcode: row['บาร์โค้ด'] ? String(row['บาร์โค้ด']).trim() : '',
+                cost: cost,
+                conversionFactor: 1,
+                defaultPrice: basePrice,
+                priceTiers: baseTiers
             });
 
-            const batch = api.writeBatch(db);
-            const now = new Date().toISOString();
-            let updatedCount = 0;
-            let addedCount = 0;
-
-            for (const row of sheetData) {
-                const productCode = row['รหัสสินค้า'] ? String(row['รหัสสินค้า']).trim() : '';
-                if (!productCode) continue;
-
-                // --- 1. เตรียมข้อมูลพื้นฐาน (Base Unit) ---
-                const sheetName = row['ชื่อการค้า'] ? String(row['ชื่อการค้า']).trim() : '';
-                const baseUnitName = row['หน่วย'] ? String(row['หน่วย']).trim() : 'หน่วย';
-                const sheetCategory = row['หมวดหมู่'] ? String(row['หมวดหมู่']).trim() : ''; // ถ้าใน sheet ไม่มีคอลัมน์นี้จะเป็นค่าว่าง
-                
-                const baseCost = row['ต้นทุน'] !== undefined && row['ต้นทุน'] !== "" ? parseFloat(row['ต้นทุน']) : 0;
-                const basePrice = row['ราคา'] !== undefined && row['ราคา'] !== "" ? parseFloat(row['ราคา']) : 0;
-                const baseStock = row['คงเหลือ'] !== undefined && row['คงเหลือ'] !== "" ? parseInt(row['คงเหลือ'], 10) : 0;
-                const baseBarcode = row['บาร์โค้ด'] ? String(row['บาร์โค้ด']).trim() : '';
-
-                // --- 2. สร้างโครงสร้าง Pricing Units (หน่วยหลัก + หน่วยเพิ่ม) ---
-                const pricingUnits = [];
-
-                // 2.1 หน่วยหลัก (Base Unit)
-                const baseUnitTiers = [{ quantity: 1, price: basePrice }];
-                // เพิ่มเรทส่งสำหรับหน่วยหลัก (ถ้ามี)
-                if (row['เรทส่ง1_จำนวน'] && row['เรทส่ง1_ราคา']) {
-                    baseUnitTiers.push({ quantity: parseFloat(row['เรทส่ง1_จำนวน']), price: parseFloat(row['เรทส่ง1_ราคา']) });
-                }
-                if (row['เรทส่ง2_จำนวน'] && row['เรทส่ง2_ราคา']) {
-                    baseUnitTiers.push({ quantity: parseFloat(row['เรทส่ง2_จำนวน']), price: parseFloat(row['เรทส่ง2_ราคา']) });
-                }
-
+            // --- 3.2 หน่วยย่อย 1 (ถ้ามี) ---
+            if (row['ชื่อหน่วย1'] && row['จำนวน1']) {
+                const factor1 = parseFloat(row['จำนวน1']);
+                const price1 = parseFloat(row['ราคา1']) || 0;
                 pricingUnits.push({
-                    unitName: baseUnitName,
-                    barcode: baseBarcode,
-                    cost: baseCost,
-                    conversionFactor: 1,
-                    defaultPrice: basePrice,
-                    priceTiers: baseUnitTiers
+                    unitName: String(row['ชื่อหน่วย1']).trim(),
+                    barcode: row['บาร์โค้ด1'] ? String(row['บาร์โค้ด1']).trim() : '',
+                    cost: parseFloat((cost * factor1).toFixed(2)), // คำนวณต้นทุนให้อัตโนมัติ
+                    conversionFactor: factor1,
+                    defaultPrice: price1,
+                    priceTiers: [{ quantity: 1, price: price1 }]
                 });
-
-                // 2.2 หน่วยเพิ่มเติม 1 (ถ้ามี)
-                if (row['ชื่อหน่วย1'] && row['จำนวน1']) {
-                    const factor1 = parseFloat(row['จำนวน1']) || 1;
-                    const price1 = row['ราคา1'] ? parseFloat(row['ราคา1']) : 0;
-                    pricingUnits.push({
-                        unitName: String(row['ชื่อหน่วย1']).trim(),
-                        barcode: row['บาร์โค้ด1'] ? String(row['บาร์โค้ด1']).trim() : '',
-                        conversionFactor: factor1,
-                        cost: parseFloat((baseCost * factor1).toFixed(2)), // คำนวณต้นทุนให้อัตโนมัติ
-                        defaultPrice: price1,
-                        priceTiers: [{ quantity: 1, price: price1 }]
-                    });
-                }
-
-                // 2.3 หน่วยเพิ่มเติม 2 (ถ้ามี)
-                if (row['ชื่อหน่วย2'] && row['จำนวน2']) {
-                    const factor2 = parseFloat(row['จำนวน2']) || 1;
-                    const price2 = row['ราคา2'] ? parseFloat(row['ราคา2']) : 0;
-                    pricingUnits.push({
-                        unitName: String(row['ชื่อหน่วย2']).trim(),
-                        barcode: row['บาร์โค้ด2'] ? String(row['บาร์โค้ด2']).trim() : '',
-                        conversionFactor: factor2,
-                        cost: parseFloat((baseCost * factor2).toFixed(2)),
-                        defaultPrice: price2,
-                        priceTiers: [{ quantity: 1, price: price2 }]
-                    });
-                }
-
-                // --- 3. อัปเดตลง Database ---
-                const existingProductInfo = existingProducts.get(productCode);
-
-                if (existingProductInfo) {
-                    // [CASE 1] สินค้าเดิม: อัปเดตข้อมูลทับ
-                    const docRef = api.doc(productsCollectionRef, existingProductInfo.id);
-                    const updateData = {
-                        productName: sheetName || existingProductInfo.data.productName,
-                        category: sheetCategory || existingProductInfo.data.category, // ใช้ค่าเดิมถ้าใน sheet ว่าง
-                        pricingUnits: pricingUnits, // ใช้โครงสร้างใหม่จาก Sheet ทั้งชุด
-                        updatedAt: now
-                    };
-                    // อัปเดตสต็อกเฉพาะเมื่อมีค่าระบุมา (ป้องกันสต็อกหายถ้าเว้นว่าง)
-                    if (!isNaN(baseStock) && row['คงเหลือ'] !== "") {
-                        updateData.stockInBaseUnits = baseStock;
-                    }
-
-                    batch.update(docRef, updateData);
-                    updatedCount++;
-                } else {
-                    // [CASE 2] สินค้าใหม่: สร้างใหม่
-                    if (!sheetName) continue; // ต้องมีชื่อสินค้า
-                    const newDocRef = api.doc(productsCollectionRef);
-                    const newProductData = {
-                        productCode: productCode,
-                        productName: sheetName,
-                        category: sheetCategory,
-                        baseUnit: baseUnitName,
-                        stockInBaseUnits: !isNaN(baseStock) ? baseStock : 0,
-                        pricingUnits: pricingUnits,
-                        createdAt: now,
-                        updatedAt: now
-                    };
-                    batch.set(newDocRef, newProductData);
-                    addedCount++;
-                }
             }
 
-            await batch.commit();
+            // --- 3.3 หน่วยย่อย 2 (ถ้ามี) ---
+            if (row['ชื่อหน่วย2'] && row['จำนวน2']) {
+                const factor2 = parseFloat(row['จำนวน2']);
+                const price2 = parseFloat(row['ราคา2']) || 0;
+                pricingUnits.push({
+                    unitName: String(row['ชื่อหน่วย2']).trim(),
+                    barcode: row['บาร์โค้ด2'] ? String(row['บาร์โค้ด2']).trim() : '',
+                    cost: parseFloat((cost * factor2).toFixed(2)),
+                    conversionFactor: factor2,
+                    defaultPrice: price2,
+                    priceTiers: [{ quantity: 1, price: price2 }]
+                });
+            }
 
-            if (!isAutomatic) {
-                this.showInfoModal("สำเร็จ", `นำเข้าข้อมูลเรียบร้อยแล้ว\nอัปเดต ${updatedCount} รายการ, เพิ่มใหม่ ${addedCount} รายการ`);
+            // 4. เตรียม Object ที่จะบันทึก
+            const productData = {
+                productCode: code,
+                productName: name,
+                baseUnit: baseUnitName,
+                pricingUnits: pricingUnits, // บันทึกโครงสร้างหน่วยนับทั้งหมด
+                updatedAt: now
+            };
+
+            // อัปเดตสต็อกเฉพาะเมื่อในไฟล์ระบุตัวเลขมา (ถ้าเว้นว่างจะไม่ไปทับสต็อกเดิม)
+            if (stock !== null) {
+                productData.stockInBaseUnits = stock;
+            }
+
+            // 5. บันทึกลง Database
+            if (existingMap.has(code)) {
+                // อัปเดตสินค้าเดิม
+                const docId = existingMap.get(code);
+                batch.update(api.doc(productsRef, docId), productData);
+                updatedCount++;
             } else {
-                console.log(`Auto-Import: Updated ${updatedCount}, Added ${addedCount}`);
-            }
+                // สร้างสินค้าใหม่
+                productData.createdAt = now;
+                // ถ้าเป็นสินค้าใหม่และไม่มีสต็อกระบุ ให้เป็น 0
+                if (productData.stockInBaseUnits === undefined) productData.stockInBaseUnits = 0;
+                
+                // ฟิลด์ category ถ้าใน excel ไม่มี ให้ข้ามไป (หรือใส่ค่า default)
+                productData.category = 'ทั่วไป'; 
 
-        } catch (error) {
-            console.error("Error importing:", error);
-            if (!isAutomatic) this.showInfoModal("ผิดพลาด", `เกิดข้อผิดพลาด: ${error.message}`, true);
+                batch.set(api.doc(productsRef), productData);
+                addedCount++;
+            }
         }
-    },
+
+        await batch.commit();
+
+        if (!isAutomatic) {
+            this.showInfoModal("สำเร็จ", `นำเข้าเสร็จสิ้น\n- อัปเดต: ${updatedCount} รายการ\n- เพิ่มใหม่: ${addedCount} รายการ`);
+            // รีโหลดหน้าจอเพื่อให้เห็นข้อมูลใหม่
+            setTimeout(() => window.location.reload(), 1500);
+        } else {
+            console.log(`Auto-Import: Updated ${updatedCount}, Added ${addedCount}`);
+        }
+
+    } catch (e) {
+        console.error("Import Error:", e);
+        if (!isAutomatic) this.showInfoModal("ผิดพลาด", `เกิดข้อผิดพลาด: ${e.message}`, true);
+    }
+},
 
     getSalesHistoryCollectionRef() { const { appId, db, api } = window.firebaseServices;
     return api.collection(db, `artifacts/${appId}/public/data/salesHistory`); },
@@ -4412,5 +4414,6 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
