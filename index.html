@@ -1563,7 +1563,7 @@ updateAuthStatus(){
 },
 
     config: {
-        googleSheetUrl: 'https://script.google.com/macros/s/AKfycbxmfug0KSRUqLMpDgb2LLbZRtdbOmj3P8gdmh1ZyL65aLB-wsmRQ6AJZRWSHdjGA3aZ/exec',
+        googleSheetUrl: 'https://script.google.com/macros/s/AKfycbyPfHAqsEO3nG-Ua5BphdgVf2uzVWHUEYcVSxYeD4CFvx3VeT6w3kN7_KDvVLunvXVscQ/exec',
         thaiToEngMap: { 'ๅ': '1', '/': '2', '-': '3', 'ภ': '4', 'ถ': '5', 'ุ': '6', 'ึ': '7', 'ค': '8', 'ต': '9', 'จ': '0', 'ข': '-', 'ช': '=', 'ๆ': 'q', 'ไ': 'w', 'ำ': 'e', 'พ': 'r', 'ะ': 't', 'ั': 'y', 'ี': 'u', 'ร': 'i', 'น': 'o', 'ย': 'p', 'บ': '[', 'ล': ']', 'ฟ': 'a', 'ห': 's', 'ก': 'd', 'ด': 'f', 'เ': 'g', '้': 'h', '่': 'j', 'า': 'k', 'ส': 'l', 'ว': ';', 'ง': "'", 'ผ': 'z', 'ป': 
         'x', 'แ': 'c', 'อ': 'v', 'ิ': 'b', 'ท': 'n', 'ม': 'm', 'ใ': ',', 'ฝ': '.', 'ซ': '/' }
     },
@@ -1946,7 +1946,7 @@ const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().get
 
                 if (this.state.lastSheetHash && this.state.lastSheetHash !== currentHash) {
                     console.log('Auto-Import: Detected changes. Importing...');
-                    // this.showInfoModal('อัปเดตอัตโนมัติ', 'ตรวจพบการเปลี่ยนแปลงใน Google Script กำลังนำเข้าข้อมูล...');
+                    this.showInfoModal('อัปเดตอัตโนมัติ', 'ตรวจพบการเปลี่ยนแปลงใน Google Script กำลังนำเข้าข้อมูล...');
                   
                   this.importFromGoogleSheet(true);
                 } else if (!this.state.lastSheetHash) {
@@ -1986,132 +1986,148 @@ const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().get
 
 async importFromGoogleSheet(isAutomatic = false) {
     if (!isAutomatic) {
-      if (!confirm('ยืนยันการนำเข้าข้อมูล?\n\n- ต้นทุนสินค้าจะถูกคำนวณใหม่ (Base Cost x ตัวคูณ)\n- ข้อมูลสินค้าเดิมจะถูกอัปเดตตามไฟล์ Excel')) {
-        return;
-      }
-      this.showInfoModal("กำลังนำเข้า...", "กำลังดาวน์โหลดและประมวลผล...");
+        if (!confirm('คุณต้องการนำเข้าข้อมูลจาก Google Script หรือไม่?\n\nระบบจะใช้ "รหัสสินค้า" เป็นหลักในการตรวจสอบ:\n- สินค้าเดิม: จะถูกคำนวณต้นทุนใหม่ทุกหน่วย (ต้นทุนจาก Sheet x ตัวคูณ)\n- สินค้าใหม่: เพิ่มข้อมูลตามปกติ')) {
+            return;
+        }
+        this.showInfoModal("กำลังนำเข้า...", "กำลังดาวน์โหลดข้อมูลจาก Google Script กรุณารอสักครู่...");
     }
 
     try {
-      // ตรวจสอบว่ามี URL หรือยัง
-      if (!this.config.googleSheetUrl) {
-         throw new Error("ยังไม่ได้ระบุ URL ของ Google Sheet ในการตั้งค่า");
-      }
+        const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().getTime());
+        if (!response.ok) throw new Error(`Network response was not ok, status: ${response.status}`);
 
-      const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().getTime());
-      if (!response.ok) throw new Error(`Network response was not ok`);
-      
-      const results = await response.json();
-      const sheetData = results.data || results;
+        const results = await response.json();
+        const sheetData = results.data || results;
 
-      if (!sheetData || !Array.isArray(sheetData)) {
-        if (!isAutomatic) this.showInfoModal("ผิดพลาด", "ไม่พบข้อมูลในไฟล์", true);
-        return;
-      }
-
-      const { db, api } = window.firebaseServices;
-      const batch = api.writeBatch(db);
-      const collectionRef = this.getProductsCollectionRef();
-      
-      let count = 0;
-
-      sheetData.forEach(row => {
-        const productCode = String(row['รหัสสินค้า'] || '').trim();
-        if (!productCode) return; // ข้ามแถวที่ไม่มีรหัสสินค้า
-
-        // ============================================================
-        // 1. การคำนวณต้นทุน (Cost Calculation)
-        // ============================================================
-        
-        // อ่านต้นทุนพื้นฐาน (Base Cost) จากคอลัมน์ 'ต้นทุน'
-        const baseCost = parseFloat(row['ต้นทุน']) || 0;
-
-        // --- หน่วยหลัก (Main Unit) ---
-        // หน่วยหลักถือว่าเป็น 1 ชิ้นเสมอ (เพราะไม่มีคอลัมน์ 'จำนวน' สำหรับหน่วยหลัก)
-        const mainUnitCost = baseCost * 1; 
-
-        // --- หน่วยย่อย (Extra Units) ---
-        const extraUnits = [];
-
-        // ฟังก์ชันช่วยสร้างหน่วยย่อยและคำนวณต้นทุน
-        const addExtraUnit = (name, barcode, qtyVal, priceVal) => {
-            if (!name) return;
-            const qty = parseFloat(qtyVal) || 1;
-            extraUnits.push({
-                name: String(name).trim(),
-                barcode: String(barcode || ''),
-                qty: qty,
-                price: parseFloat(priceVal) || 0,
-                cost: baseCost * qty  // <--- ต้นทุน = ฐาน x จำนวน
-            });
-        };
-
-        // เพิ่มหน่วยย่อยตามคอลัมน์ที่มี
-        addExtraUnit(row['ชื่อหน่วย1'], row['บาร์โค้ด1'], row['จำนวน1'], row['ราคา1']);
-        addExtraUnit(row['ชื่อหน่วย2'], row['บาร์โค้ด2'], row['จำนวน2'], row['ราคา2']);
-
-        // ============================================================
-        // 2. จัดการเรทราคาส่ง (Wholesale Rates)
-        // ============================================================
-        let priceTiers = [];
-        
-        // เรทที่ 1
-        if (row['เรทส่ง1_จำนวน'] && row['เรทส่ง1_ราคา']) {
-            priceTiers.push({
-                min: parseFloat(row['เรทส่ง1_จำนวน']),
-                price: parseFloat(row['เรทส่ง1_ราคา'])
-            });
-        }
-        // เรทที่ 2
-        if (row['เรทส่ง2_จำนวน'] && row['เรทส่ง2_ราคา']) {
-            priceTiers.push({
-                min: parseFloat(row['เรทส่ง2_จำนวน']),
-                price: parseFloat(row['เรทส่ง2_ราคา'])
-            });
+        if (!sheetData || !Array.isArray(sheetData) || sheetData.length === 0) {
+            if (!isAutomatic) this.showInfoModal("ผิดพลาด", "ไม่พบข้อมูลจาก Google Script", true);
+            return;
         }
 
-        // ============================================================
-        // 3. เตรียมข้อมูลบันทึก
-        // ============================================================
-        const productData = {
-            productCode: productCode,
-            productName: String(row['ชื่อการค้า'] || ''),  // แก้ให้ตรงกับหัวตาราง
-            // ไม่มีคอลัมน์หมวดหมู่ ใส่ค่า Default ไว้
-            category: 'ทั่วไป', 
-            
-            // ข้อมูลหน่วยหลัก
-            baseUnit: String(row['หน่วย'] || 'ชิ้น'), // แก้ให้ตรงกับหัวตาราง
-            price: parseFloat(row['ราคา'] || 0),      // แก้ให้ตรงกับหัวตาราง
-            cost: mainUnitCost, // ใช้ค่าที่คำนวณ (เท่ากับ baseCost)
-            
-            // สต็อก
-            stock: parseFloat(row['คงเหลือ'] || 0),   // แก้ให้ตรงกับหัวตาราง
-            
-            // ข้อมูลเสริม
-            extraUnits: extraUnits,
-            priceTiers: priceTiers,
-            
-            updatedAt: new Date().toISOString()
-        };
+        const { db, api } = window.firebaseServices;
+        const productsCollectionRef = this.getProductsCollectionRef();
 
-        const docRef = api.doc(collectionRef, productCode);
-        batch.set(docRef, productData, { merge: true });
-        count++;
-      });
+        if (!isAutomatic) this.showInfoModal("กำลังประมวลผล...", "กำลังตรวจสอบและอัปเดตข้อมูล...");
 
-      if (count > 0) {
+        // โหลดข้อมูลสินค้าเดิม
+        const existingProducts = new Map();
+        const snapshot = await api.getDocs(productsCollectionRef);
+        snapshot.forEach(doc => {
+            const product = doc.data();
+            if (product.productCode) {
+                existingProducts.set(String(product.productCode), { id: doc.id, data: product });
+            }
+        });
+
+        const batch = api.writeBatch(db);
+        const now = new Date().toISOString();
+        let updatedCount = 0;
+        let addedCount = 0;
+
+        for (const row of sheetData) {
+            const productCode = row['รหัสสินค้า'] ? String(row['รหัสสินค้า']).trim() : '';
+            if (!productCode) continue;
+
+            // ค่าต่างๆ จาก Sheet
+            const sheetName = row['ชื่อการค้า'] ? String(row['ชื่อการค้า']).trim() : '';
+            const sheetUnit = row['หน่วย'] ? String(row['หน่วย']).trim() : 'หน่วย';
+            const sheetCategory = row['หมวดหมู่'] ? String(row['หมวดหมู่']).trim() : '';
+            const sheetCost = row['ต้นทุน'] !== undefined && row['ต้นทุน'] !== "" ? parseFloat(row['ต้นทุน']) : NaN;
+            const sheetPrice = row['ราคา'] !== undefined && row['ราคา'] !== "" ? parseFloat(row['ราคา']) : NaN;
+            const sheetStock = row['คงเหลือ'] !== undefined && row['คงเหลือ'] !== "" ? parseInt(row['คงเหลือ'], 10) : NaN;
+            const barcode = row['บาร์โค้ด'] ? String(row['บาร์โค้ด']).trim() : '';
+
+            const existingProductInfo = existingProducts.get(productCode);
+
+            if (existingProductInfo) {
+                // ============================================================
+                // [CASE 1] สินค้าเดิม: คำนวณต้นทุนใหม่ทุกหน่วย (รวม Base Unit)
+                // ============================================================
+                const productData = existingProductInfo.data;
+                const docRef = api.doc(productsCollectionRef, existingProductInfo.id);
+                let updatedPricingUnits = [...(productData.pricingUnits || [])];
+
+                // ถ้าใน Sheet มีค่าต้นทุนมา -> ให้คำนวณใหม่ทุกหน่วย
+                if (!isNaN(sheetCost)) {
+                    updatedPricingUnits = updatedPricingUnits.map((unit, index) => {
+                        // ดึงตัวคูณของหน่วยนั้นๆ (ถ้าไม่มีให้เป็น 1)
+                        const factor = parseFloat(unit.conversionFactor) || 1;
+                        
+                        // [แก้ไข] ใช้สูตรเดียวกันหมด: ต้นทุน = ราคาต่อหน่วยย่อย * ตัวคูณ
+                        unit.cost = parseFloat((sheetCost * factor).toFixed(2));
+
+                        // พิเศษเฉพาะหน่วยแรก: อัปเดตราคาขาย (ถ้ามีค่ามา)
+                        if (index === 0 && !isNaN(sheetPrice)) {
+                            unit.defaultPrice = sheetPrice;
+                            if (unit.priceTiers && unit.priceTiers.length > 0) {
+                                unit.priceTiers[0].price = sheetPrice;
+                            }
+                        }
+                        return unit;
+                    });
+                } else if (!isNaN(sheetPrice)) {
+                    // กรณีไม่มีต้นทุนมา แต่มีราคาขาย -> อัปเดตราคาขายหน่วยแรก
+                    if (updatedPricingUnits.length > 0) {
+                        updatedPricingUnits[0].defaultPrice = sheetPrice;
+                        if (updatedPricingUnits[0].priceTiers && updatedPricingUnits[0].priceTiers.length > 0) {
+                            updatedPricingUnits[0].priceTiers[0].price = sheetPrice;
+                        }
+                    }
+                }
+
+                batch.update(docRef, {
+                    productName: sheetName || productData.productName,
+                    stockInBaseUnits: !isNaN(sheetStock) ? sheetStock : productData.stockInBaseUnits,
+                    pricingUnits: updatedPricingUnits,
+                    updatedAt: now
+                });
+                updatedCount++;
+
+            } else {
+                // ============================================================
+                // [CASE 2] สินค้าใหม่: สร้างใหม่ตามปกติ
+                // ============================================================
+                if (!sheetName) continue;
+                const newDocRef = api.doc(productsCollectionRef);
+                const finalCost = !isNaN(sheetCost) ? sheetCost : 0;
+                const finalPrice = !isNaN(sheetPrice) ? sheetPrice : 0;
+                const finalStock = !isNaN(sheetStock) ? sheetStock : 0;
+
+                const newProductData = {
+                    productCode: productCode,
+                    productName: sheetName,
+                    category: sheetCategory,
+                    baseUnit: sheetUnit,
+                    stockInBaseUnits: finalStock,
+                    pricingUnits: [{
+                        unitName: sheetUnit,
+                        barcode: barcode,
+                        cost: finalCost, // สินค้าใหม่ หน่วยแรกตัวคูณคือ 1 ดังนั้นค่าเท่าเดิม
+                        conversionFactor: 1,
+                        defaultPrice: finalPrice,
+                        priceTiers: [{ quantity: 1, price: finalPrice }]
+                    }],
+                    createdAt: now,
+                    updatedAt: now
+                };
+                batch.set(newDocRef, newProductData);
+                addedCount++;
+            }
+        }
+
         await batch.commit();
-        if (!isAutomatic) this.showInfoModal("สำเร็จ", `นำเข้าข้อมูลเรียบร้อยแล้ว ${count} รายการ`, false);
-        this.listenForProducts(); 
-      } else {
-        if (!isAutomatic) this.showInfoModal("แจ้งเตือน", "ไม่พบข้อมูลที่นำเข้าได้", true);
-      }
+
+        if (!isAutomatic) {
+            this.showInfoModal("สำเร็จ", `นำเข้าข้อมูลเรียบร้อยแล้ว\nอัปเดต ${updatedCount} รายการ, เพิ่มใหม่ ${addedCount} รายการ`);
+        } else {
+            console.log(`Auto-Import: Updated ${updatedCount}, Added ${addedCount}`);
+        }
 
     } catch (error) {
-      console.error("Error importing sheet:", error);
-      if (!isAutomatic) this.showInfoModal("ผิดพลาด", "เกิดข้อผิดพลาด: " + error.message, true);
+        console.error("Error importing:", error);
+        if (!isAutomatic) this.showInfoModal("ผิดพลาด", `เกิดข้อผิดพลาด: ${error.message}`, true);
     }
-  },
+},
 
     getSalesHistoryCollectionRef() { const { appId, db, api } = window.firebaseServices;
     return api.collection(db, `artifacts/${appId}/public/data/salesHistory`); },
@@ -4385,8 +4401,3 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
-
-
-
-
-
