@@ -1986,7 +1986,8 @@ const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().get
 
 async importFromGoogleSheet(isAutomatic = false) {
     if (!isAutomatic) {
-        if (!confirm('ยืนยันการนำเข้าข้อมูล?\n\nระบบจะคำนวณ "ต้นทุน" ของทุกหน่วยนับและทุกระดับราคาใหม่ทั้งหมด โดยอ้างอิงจากต้นทุนใน Google Sheets')) {
+        // เปลี่ยนข้อความยืนยันให้ตรงกับการทำงานใหม่
+        if (!confirm('ยืนยันการนำเข้าข้อมูล?\n\nระบบจะนำเข้าโครงสร้างสินค้าจาก Google Sheets แต่จะใช้ "ตัวคูณหน่วยนับเดิม" ในระบบคำนวณต้นทุน (ถ้ามี)')) {
             return;
         }
         this.showInfoModal("กำลังนำเข้า...", "กำลังคำนวณต้นทุนและอัปเดตข้อมูล...");
@@ -2006,12 +2007,17 @@ async importFromGoogleSheet(isAutomatic = false) {
         const batch = api.writeBatch(db);
         const now = new Date().toISOString();
 
-        // โหลดข้อมูลเดิมมาเช็ค ID
+        // ---------------------------------------------------------
+        // [แก้ไขจุดที่ 1] โหลดข้อมูลเดิมมาเก็บไว้ทั้งก้อน (เพื่อเอา PricingUnits มาหาตัวคูณ)
+        // ---------------------------------------------------------
         const existingDocs = await api.getDocs(productsRef);
         const existingMap = new Map();
         existingDocs.forEach(doc => {
             const d = doc.data();
-            if (d.productCode) existingMap.set(String(d.productCode), doc.id);
+            if (d.productCode) {
+                // เก็บทั้ง ID และ Data เพื่อดึงตัวคูณเก่ามาใช้
+                existingMap.set(String(d.productCode), { id: doc.id, data: d });
+            }
         });
 
         let updatedCount = 0;
@@ -2024,10 +2030,13 @@ async importFromGoogleSheet(isAutomatic = false) {
             const name = row['ชื่อการค้า'] ? String(row['ชื่อการค้า']).trim() : 'สินค้าไม่มีชื่อ';
             
             // --- 1. ต้นทุนหลัก (Base Cost) จาก Sheet ---
-            // นี่คือต้นทุนต่อ 1 หน่วยย่อยที่สุด (เช่น ต่อชิ้น)
             const baseCost = parseFloat(row['ต้นทุน']) || 0;
             const basePrice = parseFloat(row['ราคา']) || 0;
             const stock = row['คงเหลือ'] !== "" && row['คงเหลือ'] !== undefined ? parseInt(row['คงเหลือ']) : null;
+
+            // ดึงข้อมูลเก่า (ถ้ามี)
+            const existingProduct = existingMap.get(code); 
+            const existingData = existingProduct ? existingProduct.data : null;
 
             const pricingUnits = [];
 
@@ -2036,67 +2045,75 @@ async importFromGoogleSheet(isAutomatic = false) {
             // =========================================================
             const baseUnitName = row['หน่วย'] ? String(row['หน่วย']).trim() : 'ชิ้น';
             
-            // สร้าง Tier ของหน่วยหลัก
             const baseTiers = [];
             
-            // Tier 1: ราคาขายปลีก (1 ชิ้น)
+            // Tier 1: ราคาขายปลีก
             baseTiers.push({ 
                 quantity: 1, 
                 price: basePrice,
-                totalCost: baseCost * 1 // <--- คำนวณต้นทุนตามที่คุณขอ
+                totalCost: baseCost * 1 
             });
 
-            // Tier 2: เรทส่ง 1 (ถ้ามี)
+            // Tier 2: เรทส่ง 1
             if (row['เรทส่ง1_จำนวน'] && row['เรทส่ง1_ราคา']) {
                 const q1 = parseFloat(row['เรทส่ง1_จำนวน']);
                 baseTiers.push({ 
                     quantity: q1, 
                     price: parseFloat(row['เรทส่ง1_ราคา']),
-                    totalCost: baseCost * q1 // <--- คำนวณต้นทุน (ต้นทุนต่อชิ้น * จำนวน)
+                    totalCost: baseCost * q1 
                 });
             }
 
-            // Tier 3: เรทส่ง 2 (ถ้ามี)
+            // Tier 3: เรทส่ง 2
             if (row['เรทส่ง2_จำนวน'] && row['เรทส่ง2_ราคา']) {
                 const q2 = parseFloat(row['เรทส่ง2_จำนวน']);
                 baseTiers.push({ 
                     quantity: q2, 
                     price: parseFloat(row['เรทส่ง2_ราคา']),
-                    totalCost: baseCost * q2 // <--- คำนวณต้นทุน
+                    totalCost: baseCost * q2 
                 });
             }
 
-            // เรียงลำดับและบันทึกหน่วยหลัก
             baseTiers.sort((a, b) => a.quantity - b.quantity);
             pricingUnits.push({
                 unitName: baseUnitName,
                 barcode: row['บาร์โค้ด'] ? String(row['บาร์โค้ด']).trim() : '',
-                cost: baseCost,          // ต้นทุนต่อหน่วย
+                cost: baseCost,
                 conversionFactor: 1,
                 defaultPrice: basePrice,
                 priceTiers: baseTiers
             });
 
             // =========================================================
-            // ส่วนที่ 2: หน่วยย่อย 1 (เช่น แพ็ค, โหล)
+            // ส่วนที่ 2: หน่วยย่อย 1 (เช่น แพ็ค)
             // =========================================================
-            if (row['ชื่อหน่วย1'] && row['จำนวน1']) {
-                const factor1 = parseFloat(row['จำนวน1']); // เช่น 12 ชิ้น
-                const price1 = parseFloat(row['ราคา1']) || 0;
-                
-                // คำนวณต้นทุนของหน่วยนี้ (ต้นทุนชิ้น * 12)
+            if (row['ชื่อหน่วย1']) {
+                const unitName1 = String(row['ชื่อหน่วย1']).trim();
+                let factor1 = parseFloat(row['จำนวน1']) || 1; // ค่า Default จาก Sheet
+
+                // [แก้ไขจุดที่ 2] ใช้สูตร: Cost ใหม่ = ต้นทุนจาก Sheet * ตัวคูณเดิมในระบบ
+                if (existingData && existingData.pricingUnits) {
+                    const existingUnit = existingData.pricingUnits.find(u => u.unitName === unitName1);
+                    if (existingUnit) {
+                        // ถ้าเจอหน่วยชื่อเดียวกันในระบบ ให้ใช้ตัวคูณเดิม
+                        factor1 = existingUnit.conversionFactor; 
+                    }
+                }
+
+                // คำนวณต้นทุนด้วย Factor ที่เลือกมา (จากระบบ หรือ จาก Sheet)
                 const unitCost1 = parseFloat((baseCost * factor1).toFixed(2));
+                const price1 = parseFloat(row['ราคา1']) || 0;
 
                 pricingUnits.push({
-                    unitName: String(row['ชื่อหน่วย1']).trim(),
+                    unitName: unitName1,
                     barcode: row['บาร์โค้ด1'] ? String(row['บาร์โค้ด1']).trim() : '',
-                    cost: unitCost1,     // ต้นทุนต่อหน่วยนี้ (เช่น ต้นทุนต่อแพ็ค)
-                    conversionFactor: factor1,
+                    cost: unitCost1,       // <--- Cost คำนวณตามสูตรที่คุณขอแล้ว
+                    conversionFactor: factor1, // <--- ใช้ Factor ที่ถูกต้อง
                     defaultPrice: price1,
                     priceTiers: [{ 
                         quantity: 1, 
                         price: price1,
-                        totalCost: unitCost1 * 1 // ต้นทุนของ Tier นี้
+                        totalCost: unitCost1 * 1 
                     }]
                 });
             }
@@ -2104,15 +2121,23 @@ async importFromGoogleSheet(isAutomatic = false) {
             // =========================================================
             // ส่วนที่ 3: หน่วยย่อย 2 (เช่น ลัง)
             // =========================================================
-            if (row['ชื่อหน่วย2'] && row['จำนวน2']) {
-                const factor2 = parseFloat(row['จำนวน2']); // เช่น 24 ชิ้น
+            if (row['ชื่อหน่วย2']) {
+                const unitName2 = String(row['ชื่อหน่วย2']).trim();
+                let factor2 = parseFloat(row['จำนวน2']) || 1; // ค่า Default จาก Sheet
+
+                // [แก้ไขจุดที่ 3] ใช้สูตรเดียวกัน: ค้นหาตัวคูณเดิม
+                if (existingData && existingData.pricingUnits) {
+                    const existingUnit = existingData.pricingUnits.find(u => u.unitName === unitName2);
+                    if (existingUnit) {
+                        factor2 = existingUnit.conversionFactor;
+                    }
+                }
+
+                const unitCost2 = parseFloat((baseCost * factor2).toFixed(2));
                 const price2 = parseFloat(row['ราคา2']) || 0;
 
-                // คำนวณต้นทุนของหน่วยนี้ (ต้นทุนชิ้น * 24)
-                const unitCost2 = parseFloat((baseCost * factor2).toFixed(2));
-
                 pricingUnits.push({
-                    unitName: String(row['ชื่อหน่วย2']).trim(),
+                    unitName: unitName2,
                     barcode: row['บาร์โค้ด2'] ? String(row['บาร์โค้ด2']).trim() : '',
                     cost: unitCost2,
                     conversionFactor: factor2,
@@ -2130,14 +2155,14 @@ async importFromGoogleSheet(isAutomatic = false) {
                 productCode: code,
                 productName: name,
                 baseUnit: baseUnitName,
-                pricingUnits: pricingUnits, // ข้อมูลชุดใหม่ที่มี Cost ครบถ้วน
+                pricingUnits: pricingUnits, 
                 updatedAt: now
             };
 
             if (stock !== null) productData.stockInBaseUnits = stock;
 
-            if (existingMap.has(code)) {
-                batch.update(api.doc(productsRef, existingMap.get(code)), productData);
+            if (existingProduct) {
+                batch.update(api.doc(productsRef, existingProduct.id), productData);
                 updatedCount++;
             } else {
                 productData.createdAt = now;
@@ -2151,7 +2176,7 @@ async importFromGoogleSheet(isAutomatic = false) {
         await batch.commit();
 
         if (!isAutomatic) {
-            this.showInfoModal("สำเร็จ", `อัปเดตข้อมูลและคำนวณต้นทุนเรียบร้อยแล้ว\n(${updatedCount} แก้ไข, ${addedCount} ใหม่)`);
+            this.showInfoModal("สำเร็จ", `อัปเดตข้อมูลเรียบร้อยแล้ว\n(${updatedCount} แก้ไข, ${addedCount} ใหม่)`);
             setTimeout(() => window.location.reload(), 1500);
         } else {
             console.log(`Auto-Import: Updated ${updatedCount}, Added ${addedCount}`);
@@ -2161,7 +2186,7 @@ async importFromGoogleSheet(isAutomatic = false) {
         console.error("Import Error:", e);
         if (!isAutomatic) this.showInfoModal("ผิดพลาด", `เกิดข้อผิดพลาด: ${e.message}`, true);
     }
-},
+}
 
     getSalesHistoryCollectionRef() { const { appId, db, api } = window.firebaseServices;
     return api.collection(db, `artifacts/${appId}/public/data/salesHistory`); },
@@ -4435,6 +4460,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
 
