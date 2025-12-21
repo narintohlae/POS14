@@ -2111,7 +2111,7 @@ async importFromGoogleSheet(isAutomatic = false) {
       console.error("Error importing sheet:", error);
       if (!isAutomatic) this.showInfoModal("ผิดพลาด", "เกิดข้อผิดพลาด: " + error.message, true);
     }
-  }
+  },
 
     getSalesHistoryCollectionRef() { const { appId, db, api } = window.firebaseServices;
     return api.collection(db, `artifacts/${appId}/public/data/salesHistory`); },
@@ -4385,6 +4385,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
 
