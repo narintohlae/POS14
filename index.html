@@ -3961,184 +3961,50 @@ async generateSaleId() {
   }
 }
 ,
-async exportToExcel() {
-    // --------------------------------------------------
-    // 1) โหลดข้อมูลสินค้าจาก Google Sheets
-    // --------------------------------------------------
-    let sheetRows = [];
-    try {
-        const response = await fetch(
-            this.config.googleSheetUrl + '?t=' + Date.now()
-        );
-        const result = await response.json();
-        sheetRows = result.data || result;
-    } catch (e) {
-        this.showInfoModal(
-            "ผิดพลาด",
-            "ไม่สามารถโหลดข้อมูลสินค้าจาก Google Sheets ได้",
-            true
-        );
-        return;
-    }
-
-    if (!Array.isArray(sheetRows) || sheetRows.length === 0) {
-        this.showInfoModal(
-            "ไม่มีข้อมูลสินค้า",
-            "ไม่พบข้อมูลสินค้าใน Google Sheets",
-            false
-        );
-        return;
-    }
-
-    // --------------------------------------------------
-    // 2) แปลงข้อมูลจากชีท → product map
-    // --------------------------------------------------
-    const productMap = new Map();
-
-    sheetRows.forEach(row => {
-        const productCode = row['รหัสสินค้า'];
-        if (!productCode) return;
-
-        const baseUnit = row['หน่วย'] || 'ชิ้น';
-        const baseCost = parseFloat(row['ต้นทุน']) || 0;
-
-        const pricingUnits = [
-            {
-                unitName: baseUnit,
-                conversionFactor: 1,
-                cost: baseCost
-            }
-        ];
-
-        // หน่วยพิเศษ (เล็กกว่า base)
-        if (row['หน่วยพิเศษ'] && row['ตัวคูณ']) {
-            const multiplier = parseFloat(row['ตัวคูณ']);
-            if (!isNaN(multiplier) && multiplier > 0) {
-                const factor = 1 / multiplier;
-                pricingUnits.push({
-                    unitName: String(row['หน่วยพิเศษ']).trim(),
-                    conversionFactor: factor,
-                    cost: parseFloat((baseCost * factor).toFixed(4)),
-                    parentUnit: baseUnit,
-                    isSubUnitOfBase: true
-                });
-            }
-        }
-
-        productMap.set(String(productCode), {
-            productCode: String(productCode),
-            productName: row['ชื่อการค้า'] || '',
-            baseUnit,
-            pricingUnits
-        });
-    });
-
-    // --------------------------------------------------
-    // 3) แปลง salesHistory → export rows
-    // --------------------------------------------------
-    const dataToExport = this.state.salesHistory.flatMap(sale =>
-        sale.items.map(item => {
-
-            const product = productMap.get(String(item.productCode));
-
-            let exportUnit = item.unit;
-            let exportQty = item.quantity;
-            let pricePerUnit = '0.0000';
-            let costPerUnit = '0.0000';
-
-            if (product && Array.isArray(product.pricingUnits)) {
-
-                const specialUnit = product.pricingUnits.find(
-                    u => u.isSubUnitOfBase === true ||
-                         (u.parentUnit && u.conversionFactor < 1)
-                );
-
-                // -----------------------------
-                // มีหน่วยพิเศษ → ใช้หน่วยพิเศษ
-                // -----------------------------
-                if (specialUnit) {
-                    exportUnit = specialUnit.unitName;
-                    exportQty = item.quantity / specialUnit.conversionFactor;
-
-                    pricePerUnit = (
-                        (item.price * item.quantity) / exportQty
-                    ).toFixed(4);
-
-                    costPerUnit = (
-                        specialUnit.cost || 0
-                    ).toFixed(4);
-
+    exportToExcel() {
+        const dataToExport = this.state.salesHistory.flatMap(sale =>
+            sale.items.map(item => {
+                let productName = item.name, unit = item.unit, quantity = item.quantity, pricePerBaseUnit = 'N/A', costPerBaseUnit = 'N/A';
+                if (item.conversionFactor && item.baseUnit) {
+          
+                         productName = item.productName;
+                    unit = item.baseUnit;
+                    quantity = item.quantity * item.conversionFactor;
+                    pricePerBaseUnit = (item.price / item.conversionFactor).toFixed(4);
+                  
+                     costPerBaseUnit = (item.costPerBaseUnit || 0).toFixed(4);
                 } else {
-                    // -----------------------------
-                    // ไม่มี → ใช้หน่วยหลัก
-                    // -----------------------------
-                    const baseUnit = product.pricingUnits.find(
-                        u => u.conversionFactor === 1
-                    );
-
-                    exportUnit = baseUnit?.unitName || product.baseUnit;
-                    exportQty = item.quantity;
-
-                    pricePerUnit = (
-                        item.price
-                    ).toFixed(4);
-
-                    costPerUnit = (
-                        baseUnit?.cost || 0
-                    ).toFixed(4);
+                    const fullProductUnit = this.state.searchableProductUnits.find(p => p.cartItemId === item.cartItemId);
+                    if (fullProductUnit && fullProductUnit.pricingUnit) {
+                        const 
+                        conversionFactor = fullProductUnit.pricingUnit.conversionFactor || 1;
+                        const costPerSellingUnit = fullProductUnit.pricingUnit.cost ||
+                        0;
+                        productName = fullProductUnit.productName;
+                        unit = fullProductUnit.baseUnit;
+                        quantity = item.quantity * conversionFactor;
+                        pricePerBaseUnit = (item.price / conversionFactor).toFixed(4);
+                        costPerBaseUnit = (costPerSellingUnit / conversionFactor).toFixed(4);
+                    }
                 }
-            }
-
-            return {
-                'รหัสการขาย': sale.id,
-                'วันที่': new Date(sale.timestamp).toLocaleDateString('th-TH'),
-                'เวลา': new Date(sale.timestamp).toLocaleTimeString('th-TH'),
-                'ยอดรวมก่อนลด': sale.subtotal ? sale.subtotal.toFixed(2) : '0.00',
-                'ส่วนลด': sale.discount ? sale.discount.toFixed(2) : '0.00',
-                'ยอดสุทธิ': sale.total ? sale.total.toFixed(2) : '0.00',
-                'สินค้า': item.productName || item.name,
-                'หน่วย': exportUnit,
-                'จำนวน': exportQty,
-                'มูลค่ารวม (รายการนี้)': (item.price * item.quantity).toFixed(2),
-                'ราคาต่อหน่วย': pricePerUnit,
-                'ต้นทุนต่อหน่วย': costPerUnit
-            };
-        })
-    );
-
-    if (dataToExport.length === 0) {
-        this.showInfoModal(
-            "ไม่มีข้อมูล",
-            "ไม่มีข้อมูลประวัติการขายให้ Export",
-            false
+                return {
+                    'รหัสการขาย': sale.id, 'วันที่': new Date(sale.timestamp).toLocaleDateString('th-TH'), 'เวลา': new Date(sale.timestamp).toLocaleTimeString('th-TH'),
+                    'ยอดรวมก่อนลด': sale.subtotal ?
+                    sale.subtotal.toFixed(2) : '0.00', 'ส่วนลด': sale.discount ? sale.discount.toFixed(2) : '0.00',
+                    'ยอดสุทธิ': sale.total ?
+                    sale.total.toFixed(2) : '0.00', 'สินค้า': productName, 'หน่วย': unit, 'จำนวน (หน่วยเล็กที่สุด)': quantity,
+                    'มูลค่ารวม (รายการนี้)': (item.price * item.quantity).toFixed(2), 'ราคาต่อหน่วยเล็กที่สุด': pricePerBaseUnit, 'ต้นทุนต่อหน่วยเล็กที่สุด': costPerBaseUnit
+                };
+            })
         );
-        return;
-    }
-
-    // --------------------------------------------------
-    // 4) สร้าง Excel
-    // --------------------------------------------------
-    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
-    const workbook = XLSX.utils.book_new();
-
-    XLSX.utils.book_append_sheet(
-        workbook,
-        worksheet,
-        'ประวัติการขาย'
-    );
-
-    worksheet['!cols'] = [
-        { wch: 20 }, { wch: 12 }, { wch: 12 },
-        { wch: 15 }, { wch: 15 }, { wch: 15 },
-        { wch: 30 }, { wch: 15 }, { wch: 12 },
-        { wch: 18 }, { wch: 18 }, { wch: 18 }
-    ];
-
-    XLSX.writeFile(
-        workbook,
-        `pos-history-export-${new Date().toISOString().split('T')[0]}.xlsx`
-    );
-},
+        if (dataToExport.length === 0) { this.showInfoModal("ไม่มีข้อมูล", "ไม่มีข้อมูลประวัติการขายให้ Export", false); return;
+        }
+        const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, 'ประวัติการขาย (หน่วยเล็ก)');
+        worksheet['!cols'] = [ { wch: 20 }, { wch: 12 }, { wch: 12 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 30 }, { wch: 15 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 20 } ];
+        XLSX.writeFile(workbook, `pos-history-base-units-${new Date().toISOString().split('T')[0]}.xlsx`);
+    },
     async loadReceiptSettings() {
         const { api } = window.firebaseServices;
         const docRef = this.getReceiptSettingsDocRef();
@@ -4672,6 +4538,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
 
