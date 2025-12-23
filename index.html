@@ -2208,8 +2208,9 @@ async importFromGoogleSheet(isAutomatic = false) {
                             price: 0,
                             totalCost: specialCost
                         }],
-                        parentUnit: baseUnitName
-                    });
+    parentUnit: baseUnitName,
+    isSubUnitOfBase: true
+});
                 }
             }
 
@@ -4672,6 +4673,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
 
