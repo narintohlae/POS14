@@ -3974,9 +3974,9 @@ exportToExcel() {
             // ===============================
             // หา product เต็ม เพื่อดู pricingUnits
             // ===============================
-            const fullProduct = this.state.searchableProductUnits.find(
-                p => p.cartItemId === item.cartItemId
-            );
+const fullProduct = this.state.products.find(
+    p => p.productCode === item.productCode
+);
 
             if (fullProduct && Array.isArray(fullProduct.pricingUnits)) {
 
@@ -4602,6 +4602,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
 
