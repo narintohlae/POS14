@@ -3961,61 +3961,129 @@ async generateSaleId() {
   }
 }
 ,
-exportToExcel() {
+async exportToExcel() {
+    // --------------------------------------------------
+    // 1) โหลดข้อมูลสินค้าจาก Google Sheets
+    // --------------------------------------------------
+    let sheetRows = [];
+    try {
+        const response = await fetch(
+            this.config.googleSheetUrl + '?t=' + Date.now()
+        );
+        const result = await response.json();
+        sheetRows = result.data || result;
+    } catch (e) {
+        this.showInfoModal(
+            "ผิดพลาด",
+            "ไม่สามารถโหลดข้อมูลสินค้าจาก Google Sheets ได้",
+            true
+        );
+        return;
+    }
+
+    if (!Array.isArray(sheetRows) || sheetRows.length === 0) {
+        this.showInfoModal(
+            "ไม่มีข้อมูลสินค้า",
+            "ไม่พบข้อมูลสินค้าใน Google Sheets",
+            false
+        );
+        return;
+    }
+
+    // --------------------------------------------------
+    // 2) แปลงข้อมูลจากชีท → product map
+    // --------------------------------------------------
+    const productMap = new Map();
+
+    sheetRows.forEach(row => {
+        const productCode = row['รหัสสินค้า'];
+        if (!productCode) return;
+
+        const baseUnit = row['หน่วย'] || 'ชิ้น';
+        const baseCost = parseFloat(row['ต้นทุน']) || 0;
+
+        const pricingUnits = [
+            {
+                unitName: baseUnit,
+                conversionFactor: 1,
+                cost: baseCost
+            }
+        ];
+
+        // หน่วยพิเศษ (เล็กกว่า base)
+        if (row['หน่วยพิเศษ'] && row['ตัวคูณ']) {
+            const multiplier = parseFloat(row['ตัวคูณ']);
+            if (!isNaN(multiplier) && multiplier > 0) {
+                const factor = 1 / multiplier;
+                pricingUnits.push({
+                    unitName: String(row['หน่วยพิเศษ']).trim(),
+                    conversionFactor: factor,
+                    cost: parseFloat((baseCost * factor).toFixed(4)),
+                    parentUnit: baseUnit,
+                    isSubUnitOfBase: true
+                });
+            }
+        }
+
+        productMap.set(String(productCode), {
+            productCode: String(productCode),
+            productName: row['ชื่อการค้า'] || '',
+            baseUnit,
+            pricingUnits
+        });
+    });
+
+    // --------------------------------------------------
+    // 3) แปลง salesHistory → export rows
+    // --------------------------------------------------
     const dataToExport = this.state.salesHistory.flatMap(sale =>
         sale.items.map(item => {
 
-            let productName = item.productName || item.name;
-            let unit = item.unit;
-            let quantity = item.quantity;
-            let pricePerSmallestUnit = '0.0000';
-            let costPerSmallestUnit = '0.0000';
+            const product = productMap.get(String(item.productCode));
 
-            // ===============================
-            // หา product เต็ม เพื่อดู pricingUnits
-            // ===============================
-const fullProduct = this.state.products.find(
-    p => p.productCode === item.productCode
-);
+            let exportUnit = item.unit;
+            let exportQty = item.quantity;
+            let pricePerUnit = '0.0000';
+            let costPerUnit = '0.0000';
 
-            if (fullProduct && Array.isArray(fullProduct.pricingUnits)) {
+            if (product && Array.isArray(product.pricingUnits)) {
 
-                // หา "หน่วยพิเศษ" (เล็กกว่า base)
-                const specialUnit = fullProduct.pricingUnits.find(
-                    u => u.parentUnit && u.conversionFactor < 1
+                const specialUnit = product.pricingUnits.find(
+                    u => u.isSubUnitOfBase === true ||
+                         (u.parentUnit && u.conversionFactor < 1)
                 );
 
-                // ===============================
-                // กรณีมีหน่วยพิเศษ → ใช้หน่วยพิเศษ
-                // ===============================
+                // -----------------------------
+                // มีหน่วยพิเศษ → ใช้หน่วยพิเศษ
+                // -----------------------------
                 if (specialUnit) {
-                    unit = specialUnit.unitName;
-                    quantity = item.quantity / specialUnit.conversionFactor;
+                    exportUnit = specialUnit.unitName;
+                    exportQty = item.quantity / specialUnit.conversionFactor;
 
-                    pricePerSmallestUnit = (
-                        item.price / quantity
+                    pricePerUnit = (
+                        (item.price * item.quantity) / exportQty
                     ).toFixed(4);
 
-                    costPerSmallestUnit = (
+                    costPerUnit = (
                         specialUnit.cost || 0
                     ).toFixed(4);
 
                 } else {
-                    // ===============================
-                    // กรณีไม่มี → ใช้หน่วยหลัก (เดิม)
-                    // ===============================
-                    const baseUnit = fullProduct.pricingUnits.find(
+                    // -----------------------------
+                    // ไม่มี → ใช้หน่วยหลัก
+                    // -----------------------------
+                    const baseUnit = product.pricingUnits.find(
                         u => u.conversionFactor === 1
                     );
 
-                    unit = baseUnit?.unitName || fullProduct.baseUnit;
-                    quantity = item.quantity;
+                    exportUnit = baseUnit?.unitName || product.baseUnit;
+                    exportQty = item.quantity;
 
-                    pricePerSmallestUnit = (
-                        item.price / item.quantity
+                    pricePerUnit = (
+                        item.price
                     ).toFixed(4);
 
-                    costPerSmallestUnit = (
+                    costPerUnit = (
                         baseUnit?.cost || 0
                     ).toFixed(4);
                 }
@@ -4028,12 +4096,12 @@ const fullProduct = this.state.products.find(
                 'ยอดรวมก่อนลด': sale.subtotal ? sale.subtotal.toFixed(2) : '0.00',
                 'ส่วนลด': sale.discount ? sale.discount.toFixed(2) : '0.00',
                 'ยอดสุทธิ': sale.total ? sale.total.toFixed(2) : '0.00',
-                'สินค้า': productName,
-                'หน่วย': unit,
-                'จำนวน': quantity,
+                'สินค้า': item.productName || item.name,
+                'หน่วย': exportUnit,
+                'จำนวน': exportQty,
                 'มูลค่ารวม (รายการนี้)': (item.price * item.quantity).toFixed(2),
-                'ราคาต่อหน่วย': pricePerSmallestUnit,
-                'ต้นทุนต่อหน่วย': costPerSmallestUnit
+                'ราคาต่อหน่วย': pricePerUnit,
+                'ต้นทุนต่อหน่วย': costPerUnit
             };
         })
     );
@@ -4047,6 +4115,9 @@ const fullProduct = this.state.products.find(
         return;
     }
 
+    // --------------------------------------------------
+    // 4) สร้าง Excel
+    // --------------------------------------------------
     const worksheet = XLSX.utils.json_to_sheet(dataToExport);
     const workbook = XLSX.utils.book_new();
 
@@ -4068,7 +4139,6 @@ const fullProduct = this.state.products.find(
         `pos-history-export-${new Date().toISOString().split('T')[0]}.xlsx`
     );
 },
-
     async loadReceiptSettings() {
         const { api } = window.firebaseServices;
         const docRef = this.getReceiptSettingsDocRef();
@@ -4602,6 +4672,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
 
