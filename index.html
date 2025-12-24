@@ -2231,7 +2231,7 @@ async importFromGoogleSheet(isAutomatic = false) {
             );
         }
     }
-},,
+},
 
     getSalesHistoryCollectionRef() { const { appId, db, api } = window.firebaseServices;
     return api.collection(db, `artifacts/${appId}/public/data/salesHistory`); },
@@ -4594,6 +4594,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
 
