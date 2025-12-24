@@ -1983,113 +1983,7 @@ const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().get
             console.log('Auto-Import: Polling stopped.');
         }
     },
-function safeImportProduct(row, existingData = null) {
-    const baseUnitName = row['หน่วย'] ? String(row['หน่วย']).trim() : 'ชิ้น';
-    const baseCost = parseFloat(row['ต้นทุน']) || 0;
-    const basePrice = parseFloat(row['ราคา']) || 0;
 
-    const pricingUnits = [];
-
-    // -------------------------
-    // หน่วยหลัก
-    // -------------------------
-    pricingUnits.push({
-        unitName: baseUnitName,
-        barcode: row['บาร์โค้ด'] ? String(row['บาร์โค้ด']).trim() : '',
-        cost: baseCost,
-        conversionFactor: 1,
-        defaultPrice: basePrice,
-        priceTiers: buildBaseTiers(row, baseCost, basePrice)
-    });
-
-    // -------------------------
-    // หน่วยย่อย 1
-    // -------------------------
-    if (row['ชื่อหน่วย1']) {
-        pricingUnits.push(
-            buildSubUnit({
-                unitName: row['ชื่อหน่วย1'],
-                barcode: row['บาร์โค้ด1'],
-                sheetFactor: row['จำนวน1'],
-                sheetPrice: row['ราคา1'],
-                baseCost,
-                existingData
-            })
-        );
-    }
-
-    // -------------------------
-    // หน่วยย่อย 2
-    // -------------------------
-    if (row['ชื่อหน่วย2']) {
-        pricingUnits.push(
-            buildSubUnit({
-                unitName: row['ชื่อหน่วย2'],
-                barcode: row['บาร์โค้ด2'],
-                sheetFactor: row['จำนวน2'],
-                sheetPrice: row['ราคา2'],
-                baseCost,
-                existingData
-            })
-        );
-    }
-
-    return pricingUnits.filter(Boolean);
-}
-
-/* ---------- helper ---------- */
-
-function buildBaseTiers(row, baseCost, basePrice) {
-    const tiers = [
-        { quantity: 1, price: basePrice, totalCost: baseCost }
-    ];
-
-    if (row['เรทส่ง1_จำนวน'] && row['เรทส่ง1_ราคา']) {
-        const q1 = parseFloat(row['เรทส่ง1_จำนวน']);
-        tiers.push({
-            quantity: q1,
-            price: parseFloat(row['เรทส่ง1_ราคา']),
-            totalCost: baseCost * q1
-        });
-    }
-
-    if (row['เรทส่ง2_จำนวน'] && row['เรทส่ง2_ราคา']) {
-        const q2 = parseFloat(row['เรทส่ง2_จำนวน']);
-        tiers.push({
-            quantity: q2,
-            price: parseFloat(row['เรทส่ง2_ราคา']),
-            totalCost: baseCost * q2
-        });
-    }
-
-    return tiers.sort((a, b) => a.quantity - b.quantity);
-}
-
-function buildSubUnit({ unitName, barcode, sheetFactor, sheetPrice, baseCost, existingData }) {
-    const name = String(unitName).trim();
-    let factor = parseFloat(sheetFactor) || 1;
-
-    // 👉 ใช้ตัวคูณเดิมในระบบ ถ้ามี
-    if (existingData?.pricingUnits) {
-        const oldUnit = existingData.pricingUnits.find(u => u.unitName === name);
-        if (oldUnit) factor = oldUnit.conversionFactor;
-    }
-
-    const cost = parseFloat((baseCost * factor).toFixed(2));
-
-    return {
-        unitName: name,
-        barcode: barcode ? String(barcode).trim() : '',
-        cost,
-        conversionFactor: factor,
-        defaultPrice: parseFloat(sheetPrice) || 0,
-        priceTiers: [{
-            quantity: 1,
-            price: parseFloat(sheetPrice) || 0,
-            totalCost: cost
-        }]
-    };
-},
 async importFromGoogleSheet(isAutomatic = false) {
     if (!isAutomatic) {
         // เปลี่ยนข้อความยืนยันให้ตรงกับการทำงานใหม่
@@ -4566,4 +4460,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
+
+
 
