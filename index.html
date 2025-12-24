@@ -1998,7 +1998,7 @@ async importFromGoogleSheet(isAutomatic = false) {
         }
         this.showInfoModal(
             "กำลังนำเข้า...",
-            "กำลังดาวน์โหลดและประมวลผล..."
+            "กำลังคำนวณต้นทุนแบบใหม่และอัปเดตข้อมูล..."
         );
     }
 
@@ -2030,7 +2030,6 @@ async importFromGoogleSheet(isAutomatic = false) {
         const existingMap = new Map();
         existingDocs.forEach(doc => {
             const d = doc.data();
-            // ใช้ productCode เป็น Key ในการจับคู่
             if (d.productCode) {
                 existingMap.set(String(d.productCode).trim(), {
                     id: doc.id,
@@ -2039,7 +2038,6 @@ async importFromGoogleSheet(isAutomatic = false) {
             }
         });
 
-        // เตรียม Array สำหรับเก็บคำสั่ง (Operations)
         let operations = [];
         let updatedCount = 0;
         let addedCount = 0;
@@ -2052,7 +2050,10 @@ async importFromGoogleSheet(isAutomatic = false) {
             if (!code) continue;
 
             const name = row['ชื่อการค้า'] ? String(row['ชื่อการค้า']).trim() : 'สินค้าไม่มีชื่อ';
-            const baseCost  = parseFloat(row['ต้นทุน']) || 0;
+            
+            // 👉 1. ดึงต้นทุนดิบจาก Sheet (ถือว่าเป็นต้นทุนหน่วยย่อยไว้ก่อน)
+            const rawSheetCost = parseFloat(row['ต้นทุน']) || 0;
+            
             const basePrice = parseFloat(row['ราคา']) || 0;
             const stock = (row['คงเหลือ'] !== "" && row['คงเหลือ'] !== undefined)
                 ? parseInt(row['คงเหลือ'])
@@ -2061,23 +2062,34 @@ async importFromGoogleSheet(isAutomatic = false) {
             const existingProduct = existingMap.get(code);
             const existingData = existingProduct ? existingProduct.data : null;
 
+            // 👉 2. คำนวณ Base Cost ใหม่ (ตาม Logic ตัวคูณ)
+            let calculatedBaseCost = rawSheetCost; // ค่าเริ่มต้น
+            
+            // เช็คว่ามีตัวคูณไหม? ถ้ามี ให้คูณกลับไปเป็น Base Cost
+            // (เช่น Sheet=10, ตัวคูณ=12 -> Base Cost ต้องเป็น 120)
+            if (row['หน่วยพิเศษ'] && row['ตัวคูณ']) {
+                const multiplier = parseFloat(row['ตัวคูณ']);
+                if (multiplier > 0) {
+                    calculatedBaseCost = parseFloat((rawSheetCost * multiplier).toFixed(4));
+                }
+            }
+
             const pricingUnits = [];
 
             // === 4.1 หน่วยหลัก (Base Unit) ===
             const baseUnitName = row['หน่วย'] ? String(row['หน่วย']).trim() : 'ชิ้น';
             const baseTiers = [];
-            
-            // เพิ่มเรทราคาปกติ
-            baseTiers.push({ quantity: 1, price: basePrice, totalCost: baseCost });
-            
-            // เพิ่มเรทส่ง (ถ้ามี)
+
+            // ใช้ calculatedBaseCost ที่คูณเสร็จแล้ว
+            baseTiers.push({ quantity: 1, price: basePrice, totalCost: calculatedBaseCost });
+
             ['1', '2'].forEach(i => {
                 if (row[`เรทส่ง${i}_จำนวน`] && row[`เรทส่ง${i}_ราคา`]) {
                     const q = parseFloat(row[`เรทส่ง${i}_จำนวน`]);
                     baseTiers.push({
                         quantity: q,
                         price: parseFloat(row[`เรทส่ง${i}_ราคา`]),
-                        totalCost: baseCost * q
+                        totalCost: calculatedBaseCost * q // ใช้ต้นทุน Base ใหม่
                     });
                 }
             });
@@ -2086,25 +2098,25 @@ async importFromGoogleSheet(isAutomatic = false) {
             pricingUnits.push({
                 unitName: baseUnitName,
                 barcode: row['บาร์โค้ด'] ? String(row['บาร์โค้ด']).trim() : '',
-                cost: baseCost,
+                cost: calculatedBaseCost, // ✅ บันทึกต้นทุนที่ถูกต้องลง Base
                 conversionFactor: 1,
                 defaultPrice: basePrice,
                 priceTiers: baseTiers
             });
 
-            // === 4.2 หน่วยย่อย 1 & 2 (ใหญ่กว่า Base) ===
+            // === 4.2 หน่วยย่อย 1 & 2 (ใหญ่กว่า Base เช่น ลัง/โหล) ===
             ['1', '2'].forEach(i => {
                 if (row[`ชื่อหน่วย${i}`]) {
                     const unitName = String(row[`ชื่อหน่วย${i}`]).trim();
                     let factor = parseFloat(row[`จำนวน${i}`]) || 1;
 
-                    // รักษาค่าเดิมใน DB ถ้ามี
                     if (existingData?.pricingUnits) {
                         const oldUnit = existingData.pricingUnits.find(u => u.unitName === unitName);
                         if (oldUnit) factor = oldUnit.conversionFactor;
                     }
 
-                    const unitCost = parseFloat((baseCost * factor).toFixed(2));
+                    // ต้นทุนลัง = ต้นทุน Base (ที่คูณแล้ว) * จำนวนชิ้นในลัง
+                    const unitCost = parseFloat((calculatedBaseCost * factor).toFixed(2));
                     const price = parseFloat(row[`ราคา${i}`]) || 0;
 
                     pricingUnits.push({
@@ -2118,29 +2130,28 @@ async importFromGoogleSheet(isAutomatic = false) {
                 }
             });
 
-            // === 4.3 หน่วยพิเศษ (เล็กกว่า Base) ===
-            // 💡 จุดสำคัญ: Logic นี้ต้องตรงกับ Export 💡
+            // === 4.3 หน่วยพิเศษ (เล็กกว่า Base เช่น ซอง) ===
             if (row['หน่วยพิเศษ'] && row['ตัวคูณ']) {
                 const specialUnitName = String(row['หน่วยพิเศษ']).trim();
-                const baseToSubQty = parseFloat(row['ตัวคูณ']); // เช่น 12
+                const baseToSubQty = parseFloat(row['ตัวคูณ']);
 
                 if (!isNaN(baseToSubQty) && baseToSubQty > 0) {
-                    // คำนวณ Factor: 1 / 12 = 0.08333
                     let specialFactor = 1 / baseToSubQty;
 
-                    // รักษาค่าเดิม ถ้าเคยมีใน DB
                     if (existingData?.pricingUnits) {
                         const oldUnit = existingData.pricingUnits.find(u => u.unitName === specialUnitName);
                         if (oldUnit) specialFactor = oldUnit.conversionFactor;
                     }
 
-                    const specialCost = parseFloat((baseCost * specialFactor).toFixed(4));
+                    // ✅ ต้นทุนหน่วยพิเศษ = ค่าจาก Sheet ตรงๆ ได้เลย (rawSheetCost)
+                    // หรือคำนวณจาก Base เพื่อความชัวร์ทางคณิตศาสตร์: Base * (1/Factor)
+                    const specialCost = rawSheetCost; 
 
                     pricingUnits.push({
                         unitName: specialUnitName,
                         barcode: '',
-                        cost: specialCost,
-                        conversionFactor: specialFactor, // บันทึกค่า 0.0833 ลง DB
+                        cost: specialCost, // ✅ บันทึก 10 บาท (ไม่ใช่ 0.83)
+                        conversionFactor: specialFactor,
                         defaultPrice: 0,
                         priceTiers: [{ quantity: 1, price: 0, totalCost: specialCost }],
                         parentUnit: baseUnitName
@@ -2162,7 +2173,6 @@ async importFromGoogleSheet(isAutomatic = false) {
             }
 
             if (existingProduct) {
-                // เก็บใส่ list ไว้ก่อน (ยังไม่ยิงเข้า DB)
                 operations.push({
                     type: 'UPDATE',
                     ref: api.doc(productsRef, existingProduct.id),
@@ -2173,10 +2183,9 @@ async importFromGoogleSheet(isAutomatic = false) {
                 productData.createdAt = now;
                 productData.stockInBaseUnits = stock ?? 0;
                 productData.category = 'ทั่วไป';
-                // เก็บใส่ list ไว้ก่อน
                 operations.push({
                     type: 'SET',
-                    ref: api.doc(productsRef), // ให้ Firestore gen ID ใหม่
+                    ref: api.doc(productsRef),
                     data: productData
                 });
                 addedCount++;
@@ -2184,9 +2193,9 @@ async importFromGoogleSheet(isAutomatic = false) {
         }
 
         // -------------------------------------------------
-        // 5. ทยอยบันทึก (Batch Chunking) - แก้ปัญหา Limit 500
+        // 5. ทยอยบันทึก (Batch Chunking)
         // -------------------------------------------------
-        const CHUNK_SIZE = 400; // เซฟตี้ไว้ที่ 400
+        const CHUNK_SIZE = 400;
         for (let i = 0; i < operations.length; i += CHUNK_SIZE) {
             const chunk = operations.slice(i, i + CHUNK_SIZE);
             const batch = api.writeBatch(db);
@@ -2232,7 +2241,6 @@ async importFromGoogleSheet(isAutomatic = false) {
         }
     }
 },
-
     getSalesHistoryCollectionRef() { const { appId, db, api } = window.firebaseServices;
     return api.collection(db, `artifacts/${appId}/public/data/salesHistory`); },
     getProductsCollectionRef() { const { appId, db, api } = window.firebaseServices; return api.collection(db, `artifacts/${appId}/public/data/products`);
@@ -4618,6 +4626,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
 
