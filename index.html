@@ -1985,237 +1985,141 @@ const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().get
     },
 
 async importFromGoogleSheet(isAutomatic = false) {
+    // 1. UI & Confirmation
     if (!isAutomatic) {
-        if (!confirm(
+        const confirmed = confirm(
             'ยืนยันการนำเข้าข้อมูล?\n\n' +
             'ระบบจะนำเข้าโครงสร้างสินค้าจาก Google Sheets\n' +
             'และจะรักษา "ตัวคูณหน่วยนับเดิม" ในระบบ (ถ้ามี)'
-        )) {
-            return;
-        }
-        this.showInfoModal(
-            "กำลังนำเข้า...",
-            "กำลังคำนวณต้นทุนและอัปเดตข้อมูล..."
         );
+        if (!confirmed) return;
+
+        this.showInfoModal("กำลังนำเข้า...", "กำลังดาวน์โหลดและประมวลผล...");
     }
 
     try {
-        const response = await fetch(
-            this.config.googleSheetUrl + '?t=' + new Date().getTime()
-        );
-        if (!response.ok) {
-            throw new Error(`เชื่อมต่อไม่สำเร็จ (Status: ${response.status})`);
-        }
-
+        // 2. Fetch Data
+        const response = await fetch(this.config.googleSheetUrl + '?t=' + Date.now());
+        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+        
         const results = await response.json();
         const sheetData = results.data || results;
-        if (!Array.isArray(sheetData)) {
-            throw new Error("รูปแบบข้อมูลไม่ถูกต้อง");
-        }
+        if (!Array.isArray(sheetData)) throw new Error("รูปแบบข้อมูล JSON ไม่ถูกต้อง");
 
         const { db, api } = window.firebaseServices;
         const productsRef = this.getProductsCollectionRef();
-        const batch = api.writeBatch(db);
         const now = new Date().toISOString();
 
-        // =========================================================
-        // โหลดข้อมูลเดิมทั้งหมด เพื่อดึง conversionFactor เก่า
-        // =========================================================
+        // 3. Load Existing Data (เพื่อรักษา Conversion Factor)
+        // หมายเหตุ: การดึงข้อมูลทั้งหมดอาจช้าถ้าสินค้ามีหลักหมื่นรายการ แต่จำเป็นสำหรับ Logic นี้
         const existingDocs = await api.getDocs(productsRef);
         const existingMap = new Map();
         existingDocs.forEach(doc => {
             const d = doc.data();
-            if (d.productCode) {
-                existingMap.set(String(d.productCode), {
-                    id: doc.id,
-                    data: d
-                });
-            }
+            if (d.productCode) existingMap.set(String(d.productCode), { id: doc.id, data: d });
         });
 
+        // เตรียม Array สำหรับเก็บ Operation ทั้งหมด
+        let operations = [];
         let updatedCount = 0;
         let addedCount = 0;
 
         for (const row of sheetData) {
-
-            // -----------------------------------------------------
-            // ข้อมูลพื้นฐาน
-            // -----------------------------------------------------
-            const code = row['รหัสสินค้า']
-                ? String(row['รหัสสินค้า']).trim()
-                : null;
+            const code = row['รหัสสินค้า'] ? String(row['รหัสสินค้า']).trim() : null;
             if (!code) continue;
 
-            const name = row['ชื่อการค้า']
-                ? String(row['ชื่อการค้า']).trim()
-                : 'สินค้าไม่มีชื่อ';
-
-            const baseCost  = parseFloat(row['ต้นทุน']) || 0;
+            const name = row['ชื่อการค้า'] ? String(row['ชื่อการค้า']).trim() : 'สินค้าไม่มีชื่อ';
+            const baseCost = parseFloat(row['ต้นทุน']) || 0;
             const basePrice = parseFloat(row['ราคา']) || 0;
-
-            const stock = (row['คงเหลือ'] !== "" && row['คงเหลือ'] !== undefined)
-                ? parseInt(row['คงเหลือ'])
-                : null;
+            const stock = (row['คงเหลือ'] !== "" && row['คงเหลือ'] !== undefined) 
+                          ? parseInt(row['คงเหลือ']) : null;
 
             const existingProduct = existingMap.get(code);
-            const existingData = existingProduct ? existingProduct.data : null;
+            const existingData = existingProduct?.data;
+
+            // --- Helper Function สำหรับรักษา Conversion Factor ---
+            const getFactor = (unitName, sheetFactor) => {
+                if (!existingData?.pricingUnits) return parseFloat(sheetFactor) || 1;
+                const oldUnit = existingData.pricingUnits.find(u => u.unitName === unitName);
+                // ถ้ามีของเดิม ให้ใช้ของเดิม (ตาม Business Rule ของคุณ)
+                return oldUnit ? oldUnit.conversionFactor : (parseFloat(sheetFactor) || 1);
+            };
 
             const pricingUnits = [];
 
-            // =====================================================
-            // ส่วนที่ 1: หน่วยหลัก (Base Unit)
-            // =====================================================
-            const baseUnitName = row['หน่วย']
-                ? String(row['หน่วย']).trim()
-                : 'ชิ้น';
-
-            const baseTiers = [];
-
-            baseTiers.push({
-                quantity: 1,
-                price: basePrice,
-                totalCost: baseCost
+            // --- Base Unit ---
+            const baseUnitName = row['หน่วย'] ? String(row['หน่วย']).trim() : 'ชิ้น';
+            const baseTiers = [{ quantity: 1, price: basePrice, totalCost: baseCost }];
+            
+            // เพิ่มเรทส่ง (ถ้ามี)
+            ['1', '2'].forEach(i => {
+                if (row[`เรทส่ง${i}_จำนวน`] && row[`เรทส่ง${i}_ราคา`]) {
+                    const q = parseFloat(row[`เรทส่ง${i}_จำนวน`]);
+                    baseTiers.push({
+                        quantity: q,
+                        price: parseFloat(row[`เรทส่ง${i}_ราคา`]),
+                        totalCost: baseCost * q
+                    });
+                }
             });
-
-            if (row['เรทส่ง1_จำนวน'] && row['เรทส่ง1_ราคา']) {
-                const q1 = parseFloat(row['เรทส่ง1_จำนวน']);
-                baseTiers.push({
-                    quantity: q1,
-                    price: parseFloat(row['เรทส่ง1_ราคา']),
-                    totalCost: baseCost * q1
-                });
-            }
-
-            if (row['เรทส่ง2_จำนวน'] && row['เรทส่ง2_ราคา']) {
-                const q2 = parseFloat(row['เรทส่ง2_จำนวน']);
-                baseTiers.push({
-                    quantity: q2,
-                    price: parseFloat(row['เรทส่ง2_ราคา']),
-                    totalCost: baseCost * q2
-                });
-            }
-
             baseTiers.sort((a, b) => a.quantity - b.quantity);
 
             pricingUnits.push({
                 unitName: baseUnitName,
-                barcode: row['บาร์โค้ด']
-                    ? String(row['บาร์โค้ด']).trim()
-                    : '',
+                barcode: row['บาร์โค้ด'] ? String(row['บาร์โค้ด']).trim() : '',
                 cost: baseCost,
                 conversionFactor: 1,
                 defaultPrice: basePrice,
                 priceTiers: baseTiers
             });
 
-            // =====================================================
-            // ส่วนที่ 2: หน่วยย่อย 1 (ใหญ่กว่า Base)
-            // =====================================================
-            if (row['ชื่อหน่วย1']) {
-                const unitName1 = String(row['ชื่อหน่วย1']).trim();
-                let factor1 = parseFloat(row['จำนวน1']) || 1;
-
-                if (existingData?.pricingUnits) {
-                    const oldUnit = existingData.pricingUnits.find(
-                        u => u.unitName === unitName1
-                    );
-                    if (oldUnit) factor1 = oldUnit.conversionFactor;
-                }
-
-                const unitCost1 = parseFloat((baseCost * factor1).toFixed(2));
-                const price1 = parseFloat(row['ราคา1']) || 0;
-
-                pricingUnits.push({
-                    unitName: unitName1,
-                    barcode: row['บาร์โค้ด1']
-                        ? String(row['บาร์โค้ด1']).trim()
-                        : '',
-                    cost: unitCost1,
-                    conversionFactor: factor1,
-                    defaultPrice: price1,
-                    priceTiers: [{
-                        quantity: 1,
-                        price: price1,
-                        totalCost: unitCost1
-                    }]
-                });
-            }
-
-            // =====================================================
-            // ส่วนที่ 3: หน่วยย่อย 2 (ใหญ่กว่า Base)
-            // =====================================================
-            if (row['ชื่อหน่วย2']) {
-                const unitName2 = String(row['ชื่อหน่วย2']).trim();
-                let factor2 = parseFloat(row['จำนวน2']) || 1;
-
-                if (existingData?.pricingUnits) {
-                    const oldUnit = existingData.pricingUnits.find(
-                        u => u.unitName === unitName2
-                    );
-                    if (oldUnit) factor2 = oldUnit.conversionFactor;
-                }
-
-                const unitCost2 = parseFloat((baseCost * factor2).toFixed(2));
-                const price2 = parseFloat(row['ราคา2']) || 0;
-
-                pricingUnits.push({
-                    unitName: unitName2,
-                    barcode: row['บาร์โค้ด2']
-                        ? String(row['บาร์โค้ด2']).trim()
-                        : '',
-                    cost: unitCost2,
-                    conversionFactor: factor2,
-                    defaultPrice: price2,
-                    priceTiers: [{
-                        quantity: 1,
-                        price: price2,
-                        totalCost: unitCost2
-                    }]
-                });
-            }
-
-            // =====================================================
-            // ส่วนที่ 4: หน่วยพิเศษ (เล็กกว่า Base Unit)
-            // 1 Base = ตัวคูณ × หน่วยพิเศษ
-            // conversionFactor = 1 / ตัวคูณ
-            // =====================================================
-            if (row['หน่วยพิเศษ'] && row['ตัวคูณ']) {
-                const specialUnitName = String(row['หน่วยพิเศษ']).trim();
-                const baseToSubQty = parseFloat(row['ตัวคูณ']);
-
-                if (!isNaN(baseToSubQty) && baseToSubQty > 0) {
-                    let specialFactor = 1 / baseToSubQty;
-
-                    if (existingData?.pricingUnits) {
-                        const oldUnit = existingData.pricingUnits.find(
-                            u => u.unitName === specialUnitName
-                        );
-                        if (oldUnit) specialFactor = oldUnit.conversionFactor;
-                    }
-
-                    const specialCost = parseFloat(
-                        (baseCost * specialFactor).toFixed(4)
-                    );
+            // --- Sub Units 1 & 2 ---
+            ['1', '2'].forEach(i => {
+                if (row[`ชื่อหน่วย${i}`]) {
+                    const unitName = String(row[`ชื่อหน่วย${i}`]).trim();
+                    const factor = getFactor(unitName, row[`จำนวน${i}`]); // ใช้ Helper
+                    const unitCost = parseFloat((baseCost * factor).toFixed(2));
+                    const price = parseFloat(row[`ราคา${i}`]) || 0;
 
                     pricingUnits.push({
-                        unitName: specialUnitName,
-                        barcode: '',
-                        cost: specialCost,
-                        conversionFactor: specialFactor,
-                        defaultPrice: 0,
-                        priceTiers: [{
-                            quantity: 1,
-                            price: 0,
-                            totalCost: specialCost
-                        }],
-                        parentUnit: baseUnitName
+                        unitName: unitName,
+                        barcode: row[`บาร์โค้ด${i}`] ? String(row[`บาร์โค้ด${i}`]).trim() : '',
+                        cost: unitCost,
+                        conversionFactor: factor,
+                        defaultPrice: price,
+                        priceTiers: [{ quantity: 1, price: price, totalCost: unitCost }]
                     });
                 }
+            });
+
+            // --- Special Unit (หน่วยย่อยกว่า Base) ---
+            if (row['หน่วยพิเศษ'] && row['ตัวคูณ']) {
+                const spUnitName = String(row['หน่วยพิเศษ']).trim();
+                const baseToSubQty = parseFloat(row['ตัวคูณ']); // เช่น 1 กล่อง มี 12 ชิ้น (ถ้า base คือกล่อง) หรือกลับกัน
+                
+                // Logic เดิม: คำนวณ factor ใหม่ หรือ ดึงของเก่า
+                let spFactor = (baseToSubQty > 0) ? (1 / baseToSubQty) : 1;
+                
+                // ตรวจสอบของเก่า
+                if (existingData?.pricingUnits) {
+                    const oldUnit = existingData.pricingUnits.find(u => u.unitName === spUnitName);
+                    if (oldUnit) spFactor = oldUnit.conversionFactor;
+                }
+
+                const spCost = parseFloat((baseCost * spFactor).toFixed(4));
+
+                pricingUnits.push({
+                    unitName: spUnitName,
+                    barcode: '',
+                    cost: spCost,
+                    conversionFactor: spFactor,
+                    defaultPrice: 0,
+                    priceTiers: [{ quantity: 1, price: 0, totalCost: spCost }],
+                    parentUnit: baseUnitName
+                });
             }
 
-            // =====================================================
-            // เตรียมข้อมูลบันทึก
-            // =====================================================
+            // --- Prepare Payload ---
             const productData = {
                 productCode: code,
                 productName: name,
@@ -2224,45 +2128,65 @@ async importFromGoogleSheet(isAutomatic = false) {
                 updatedAt: now
             };
 
-            if (stock !== null) {
-                productData.stockInBaseUnits = stock;
-            }
+            if (stock !== null) productData.stockInBaseUnits = stock;
 
             if (existingProduct) {
-                batch.update(
-                    api.doc(productsRef, existingProduct.id),
-                    productData
-                );
+                operations.push({
+                    type: 'UPDATE',
+                    ref: api.doc(productsRef, existingProduct.id),
+                    data: productData
+                });
                 updatedCount++;
             } else {
                 productData.createdAt = now;
                 productData.stockInBaseUnits = stock ?? 0;
                 productData.category = 'ทั่วไป';
-                batch.set(api.doc(productsRef), productData);
+                operations.push({
+                    type: 'SET',
+                    ref: api.doc(productsRef), // Auto ID
+                    data: productData
+                });
                 addedCount++;
             }
         }
 
-        await batch.commit();
+        // 4. Batch Execution (Chunking Logic)
+        // แบ่งการทำงานเป็นกลุ่มละ 400 (เผื่อเหลือเผื่อขาดจากลิมิต 500)
+        const CHUNK_SIZE = 400; 
+        for (let i = 0; i < operations.length; i += CHUNK_SIZE) {
+            const chunk = operations.slice(i, i + CHUNK_SIZE);
+            const batch = api.writeBatch(db);
+            
+            chunk.forEach(op => {
+                if (op.type === 'UPDATE') {
+                    batch.update(op.ref, op.data);
+                } else {
+                    batch.set(op.ref, op.data);
+                }
+            });
 
+            if (!isAutomatic) {
+                this.showInfoModal(
+                    "กำลังบันทึก...", 
+                    `กำลังบันทึกชุดที่ ${Math.ceil((i + 1) / CHUNK_SIZE)} จาก ${Math.ceil(operations.length / CHUNK_SIZE)}...`
+                );
+            }
+            
+            await batch.commit();
+        }
+
+        // 5. Success
         if (!isAutomatic) {
-            this.showInfoModal(
-                "สำเร็จ",
-                `อัปเดตข้อมูลเรียบร้อยแล้ว\n(${updatedCount} แก้ไข, ${addedCount} ใหม่)`
-            );
+            this.showInfoModal("สำเร็จ", `อัปเดตเรียบร้อย\n(แก้ไข: ${updatedCount}, ใหม่: ${addedCount})`);
             setTimeout(() => window.location.reload(), 1500);
         } else {
-            console.log(`Auto-Import: Updated ${updatedCount}, Added ${addedCount}`);
+            console.log(`Auto-Import Success: ${updatedCount} updated, ${addedCount} added.`);
         }
 
     } catch (e) {
         console.error("Import Error:", e);
         if (!isAutomatic) {
-            this.showInfoModal(
-                "ผิดพลาด",
-                `เกิดข้อผิดพลาด: ${e.message}`,
-                true
-            );
+            this.showInfoModal("ผิดพลาด", `เกิดข้อผิดพลาด: ${e.message}`, true);
         }
     }
 },
@@ -4620,4 +4544,5 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
