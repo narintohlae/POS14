@@ -1985,71 +1985,90 @@ const response = await fetch(this.config.googleSheetUrl + '?t=' + new Date().get
     },
 
 async importFromGoogleSheet(isAutomatic = false) {
-    // 1. UI & Confirmation
+    // -----------------------------------------------------
+    // 1. ส่วน UI และการยืนยัน
+    // -----------------------------------------------------
     if (!isAutomatic) {
-        const confirmed = confirm(
+        if (!confirm(
             'ยืนยันการนำเข้าข้อมูล?\n\n' +
             'ระบบจะนำเข้าโครงสร้างสินค้าจาก Google Sheets\n' +
             'และจะรักษา "ตัวคูณหน่วยนับเดิม" ในระบบ (ถ้ามี)'
+        )) {
+            return;
+        }
+        this.showInfoModal(
+            "กำลังนำเข้า...",
+            "กำลังดาวน์โหลดและประมวลผล..."
         );
-        if (!confirmed) return;
-
-        this.showInfoModal("กำลังนำเข้า...", "กำลังดาวน์โหลดและประมวลผล...");
     }
 
     try {
-        // 2. Fetch Data
-        const response = await fetch(this.config.googleSheetUrl + '?t=' + Date.now());
-        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-        
+        // -------------------------------------------------
+        // 2. ดึงข้อมูลจาก Google Sheet
+        // -------------------------------------------------
+        const response = await fetch(
+            this.config.googleSheetUrl + '?t=' + Date.now()
+        );
+        if (!response.ok) {
+            throw new Error(`เชื่อมต่อไม่สำเร็จ (Status: ${response.status})`);
+        }
+
         const results = await response.json();
         const sheetData = results.data || results;
-        if (!Array.isArray(sheetData)) throw new Error("รูปแบบข้อมูล JSON ไม่ถูกต้อง");
+        if (!Array.isArray(sheetData)) {
+            throw new Error("รูปแบบข้อมูลไม่ถูกต้อง");
+        }
 
         const { db, api } = window.firebaseServices;
         const productsRef = this.getProductsCollectionRef();
         const now = new Date().toISOString();
 
-        // 3. Load Existing Data (เพื่อรักษา Conversion Factor)
-        // หมายเหตุ: การดึงข้อมูลทั้งหมดอาจช้าถ้าสินค้ามีหลักหมื่นรายการ แต่จำเป็นสำหรับ Logic นี้
+        // -------------------------------------------------
+        // 3. โหลดข้อมูลเดิม (เพื่อรักษาค่า Settings เดิม)
+        // -------------------------------------------------
         const existingDocs = await api.getDocs(productsRef);
         const existingMap = new Map();
         existingDocs.forEach(doc => {
             const d = doc.data();
-            if (d.productCode) existingMap.set(String(d.productCode), { id: doc.id, data: d });
+            // ใช้ productCode เป็น Key ในการจับคู่
+            if (d.productCode) {
+                existingMap.set(String(d.productCode).trim(), {
+                    id: doc.id,
+                    data: d
+                });
+            }
         });
 
-        // เตรียม Array สำหรับเก็บ Operation ทั้งหมด
+        // เตรียม Array สำหรับเก็บคำสั่ง (Operations)
         let operations = [];
         let updatedCount = 0;
         let addedCount = 0;
 
         for (const row of sheetData) {
+            // ---------------------------------------------
+            // 4. แปลงข้อมูลจาก Sheet
+            // ---------------------------------------------
             const code = row['รหัสสินค้า'] ? String(row['รหัสสินค้า']).trim() : null;
             if (!code) continue;
 
             const name = row['ชื่อการค้า'] ? String(row['ชื่อการค้า']).trim() : 'สินค้าไม่มีชื่อ';
-            const baseCost = parseFloat(row['ต้นทุน']) || 0;
+            const baseCost  = parseFloat(row['ต้นทุน']) || 0;
             const basePrice = parseFloat(row['ราคา']) || 0;
-            const stock = (row['คงเหลือ'] !== "" && row['คงเหลือ'] !== undefined) 
-                          ? parseInt(row['คงเหลือ']) : null;
+            const stock = (row['คงเหลือ'] !== "" && row['คงเหลือ'] !== undefined)
+                ? parseInt(row['คงเหลือ'])
+                : null;
 
             const existingProduct = existingMap.get(code);
-            const existingData = existingProduct?.data;
-
-            // --- Helper Function สำหรับรักษา Conversion Factor ---
-            const getFactor = (unitName, sheetFactor) => {
-                if (!existingData?.pricingUnits) return parseFloat(sheetFactor) || 1;
-                const oldUnit = existingData.pricingUnits.find(u => u.unitName === unitName);
-                // ถ้ามีของเดิม ให้ใช้ของเดิม (ตาม Business Rule ของคุณ)
-                return oldUnit ? oldUnit.conversionFactor : (parseFloat(sheetFactor) || 1);
-            };
+            const existingData = existingProduct ? existingProduct.data : null;
 
             const pricingUnits = [];
 
-            // --- Base Unit ---
+            // === 4.1 หน่วยหลัก (Base Unit) ===
             const baseUnitName = row['หน่วย'] ? String(row['หน่วย']).trim() : 'ชิ้น';
-            const baseTiers = [{ quantity: 1, price: basePrice, totalCost: baseCost }];
+            const baseTiers = [];
+            
+            // เพิ่มเรทราคาปกติ
+            baseTiers.push({ quantity: 1, price: basePrice, totalCost: baseCost });
             
             // เพิ่มเรทส่ง (ถ้ามี)
             ['1', '2'].forEach(i => {
@@ -2073,11 +2092,18 @@ async importFromGoogleSheet(isAutomatic = false) {
                 priceTiers: baseTiers
             });
 
-            // --- Sub Units 1 & 2 ---
+            // === 4.2 หน่วยย่อย 1 & 2 (ใหญ่กว่า Base) ===
             ['1', '2'].forEach(i => {
                 if (row[`ชื่อหน่วย${i}`]) {
                     const unitName = String(row[`ชื่อหน่วย${i}`]).trim();
-                    const factor = getFactor(unitName, row[`จำนวน${i}`]); // ใช้ Helper
+                    let factor = parseFloat(row[`จำนวน${i}`]) || 1;
+
+                    // รักษาค่าเดิมใน DB ถ้ามี
+                    if (existingData?.pricingUnits) {
+                        const oldUnit = existingData.pricingUnits.find(u => u.unitName === unitName);
+                        if (oldUnit) factor = oldUnit.conversionFactor;
+                    }
+
                     const unitCost = parseFloat((baseCost * factor).toFixed(2));
                     const price = parseFloat(row[`ราคา${i}`]) || 0;
 
@@ -2092,34 +2118,37 @@ async importFromGoogleSheet(isAutomatic = false) {
                 }
             });
 
-            // --- Special Unit (หน่วยย่อยกว่า Base) ---
+            // === 4.3 หน่วยพิเศษ (เล็กกว่า Base) ===
+            // 💡 จุดสำคัญ: Logic นี้ต้องตรงกับ Export 💡
             if (row['หน่วยพิเศษ'] && row['ตัวคูณ']) {
-                const spUnitName = String(row['หน่วยพิเศษ']).trim();
-                const baseToSubQty = parseFloat(row['ตัวคูณ']); // เช่น 1 กล่อง มี 12 ชิ้น (ถ้า base คือกล่อง) หรือกลับกัน
-                
-                // Logic เดิม: คำนวณ factor ใหม่ หรือ ดึงของเก่า
-                let spFactor = (baseToSubQty > 0) ? (1 / baseToSubQty) : 1;
-                
-                // ตรวจสอบของเก่า
-                if (existingData?.pricingUnits) {
-                    const oldUnit = existingData.pricingUnits.find(u => u.unitName === spUnitName);
-                    if (oldUnit) spFactor = oldUnit.conversionFactor;
+                const specialUnitName = String(row['หน่วยพิเศษ']).trim();
+                const baseToSubQty = parseFloat(row['ตัวคูณ']); // เช่น 12
+
+                if (!isNaN(baseToSubQty) && baseToSubQty > 0) {
+                    // คำนวณ Factor: 1 / 12 = 0.08333
+                    let specialFactor = 1 / baseToSubQty;
+
+                    // รักษาค่าเดิม ถ้าเคยมีใน DB
+                    if (existingData?.pricingUnits) {
+                        const oldUnit = existingData.pricingUnits.find(u => u.unitName === specialUnitName);
+                        if (oldUnit) specialFactor = oldUnit.conversionFactor;
+                    }
+
+                    const specialCost = parseFloat((baseCost * specialFactor).toFixed(4));
+
+                    pricingUnits.push({
+                        unitName: specialUnitName,
+                        barcode: '',
+                        cost: specialCost,
+                        conversionFactor: specialFactor, // บันทึกค่า 0.0833 ลง DB
+                        defaultPrice: 0,
+                        priceTiers: [{ quantity: 1, price: 0, totalCost: specialCost }],
+                        parentUnit: baseUnitName
+                    });
                 }
-
-                const spCost = parseFloat((baseCost * spFactor).toFixed(4));
-
-                pricingUnits.push({
-                    unitName: spUnitName,
-                    barcode: '',
-                    cost: spCost,
-                    conversionFactor: spFactor,
-                    defaultPrice: 0,
-                    priceTiers: [{ quantity: 1, price: 0, totalCost: spCost }],
-                    parentUnit: baseUnitName
-                });
             }
 
-            // --- Prepare Payload ---
+            // === 4.4 เตรียม Object เพื่อบันทึก ===
             const productData = {
                 productCode: code,
                 productName: name,
@@ -2128,9 +2157,12 @@ async importFromGoogleSheet(isAutomatic = false) {
                 updatedAt: now
             };
 
-            if (stock !== null) productData.stockInBaseUnits = stock;
+            if (stock !== null) {
+                productData.stockInBaseUnits = stock;
+            }
 
             if (existingProduct) {
+                // เก็บใส่ list ไว้ก่อน (ยังไม่ยิงเข้า DB)
                 operations.push({
                     type: 'UPDATE',
                     ref: api.doc(productsRef, existingProduct.id),
@@ -2141,22 +2173,24 @@ async importFromGoogleSheet(isAutomatic = false) {
                 productData.createdAt = now;
                 productData.stockInBaseUnits = stock ?? 0;
                 productData.category = 'ทั่วไป';
+                // เก็บใส่ list ไว้ก่อน
                 operations.push({
                     type: 'SET',
-                    ref: api.doc(productsRef), // Auto ID
+                    ref: api.doc(productsRef), // ให้ Firestore gen ID ใหม่
                     data: productData
                 });
                 addedCount++;
             }
         }
 
-        // 4. Batch Execution (Chunking Logic)
-        // แบ่งการทำงานเป็นกลุ่มละ 400 (เผื่อเหลือเผื่อขาดจากลิมิต 500)
-        const CHUNK_SIZE = 400; 
+        // -------------------------------------------------
+        // 5. ทยอยบันทึก (Batch Chunking) - แก้ปัญหา Limit 500
+        // -------------------------------------------------
+        const CHUNK_SIZE = 400; // เซฟตี้ไว้ที่ 400
         for (let i = 0; i < operations.length; i += CHUNK_SIZE) {
             const chunk = operations.slice(i, i + CHUNK_SIZE);
             const batch = api.writeBatch(db);
-            
+
             chunk.forEach(op => {
                 if (op.type === 'UPDATE') {
                     batch.update(op.ref, op.data);
@@ -2167,29 +2201,37 @@ async importFromGoogleSheet(isAutomatic = false) {
 
             if (!isAutomatic) {
                 this.showInfoModal(
-                    "กำลังบันทึก...", 
-                    `กำลังบันทึกชุดที่ ${Math.ceil((i + 1) / CHUNK_SIZE)} จาก ${Math.ceil(operations.length / CHUNK_SIZE)}...`
+                    "กำลังบันทึก...",
+                    `กำลังบันทึกชุดที่ ${Math.ceil((i + 1) / CHUNK_SIZE)}...`
                 );
             }
-            
             await batch.commit();
         }
 
-        // 5. Success
+        // -------------------------------------------------
+        // 6. จบการทำงาน
+        // -------------------------------------------------
         if (!isAutomatic) {
-            this.showInfoModal("สำเร็จ", `อัปเดตเรียบร้อย\n(แก้ไข: ${updatedCount}, ใหม่: ${addedCount})`);
+            this.showInfoModal(
+                "สำเร็จ",
+                `อัปเดตข้อมูลเรียบร้อยแล้ว\n(${updatedCount} แก้ไข, ${addedCount} ใหม่)`
+            );
             setTimeout(() => window.location.reload(), 1500);
         } else {
-            console.log(`Auto-Import Success: ${updatedCount} updated, ${addedCount} added.`);
+            console.log(`Auto-Import: Updated ${updatedCount}, Added ${addedCount}`);
         }
 
     } catch (e) {
         console.error("Import Error:", e);
         if (!isAutomatic) {
-            this.showInfoModal("ผิดพลาด", `เกิดข้อผิดพลาด: ${e.message}`, true);
+            this.showInfoModal(
+                "ผิดพลาด",
+                `เกิดข้อผิดพลาด: ${e.message}`,
+                true
+            );
         }
     }
-},
+},,
 
     getSalesHistoryCollectionRef() { const { appId, db, api } = window.firebaseServices;
     return api.collection(db, `artifacts/${appId}/public/data/salesHistory`); },
@@ -3908,9 +3950,9 @@ async exportToExcel() {
     // =========================================================
     const productMap = new Map();
 
-    sheetRows.forEach((row, index) => {
+    sheetRows.forEach((row) => {
         const code = row['รหัสสินค้า'];
-        if (!code) return; // ข้ามแถวที่ไม่มีรหัส
+        if (!code) return; 
 
         // เตรียมข้อมูลพื้นฐาน
         const baseUnit = row['หน่วย'] ? String(row['หน่วย']).trim() : 'ชิ้น';
@@ -3919,21 +3961,19 @@ async exportToExcel() {
         // ตรวจสอบและเตรียมข้อมูล "หน่วยพิเศษ"
         let specialUnit = null;
         if (row['หน่วยพิเศษ'] && row['ตัวคูณ']) {
-            const qtyMultiplier = parseFloat(row['ตัวคูณ']); // เช่น 12
-            const unitName = String(row['หน่วยพิเศษ']).trim(); // เช่น "ซอง"
+            const qtyMultiplier = parseFloat(row['ตัวคูณ']);
+            const unitName = String(row['หน่วยพิเศษ']).trim();
 
             if (qtyMultiplier > 0 && unitName) {
                 specialUnit = {
                     unitName: unitName,
-                    // Logic: Factor ในระบบ = 1 / ตัวคูณในชีท
                     conversionFactor: 1 / qtyMultiplier, 
-                    // ต้นทุนเฉลี่ยต่อหน่วยย่อย
                     cost: +(baseCost / qtyMultiplier)
                 };
             }
         }
 
-        // บันทึกลง Map โดยใช้รหัสสินค้าเป็นกุญแจ (แปลงเป็น String เพื่อความชัวร์)
+        // ใช้รหัสสินค้าเป็น Key (เช่น "A001")
         productMap.set(String(code).trim(), {
             productName: row['ชื่อการค้า'],
             baseUnit,
@@ -3942,63 +3982,52 @@ async exportToExcel() {
         });
     });
 
-    // =========================================================
-    // 3. ตรวจสอบข้อมูลการขายก่อนประมวลผล
-    // =========================================================
     if (!this.state.salesHistory || this.state.salesHistory.length === 0) {
         this.showInfoModal("ไม่มีข้อมูล", "ไม่มีข้อมูลประวัติการขายให้ Export", false);
         return;
     }
 
     // =========================================================
-    // 4. วนลูปสร้างข้อมูลสำหรับ Export (หัวใจสำคัญ)
+    // 3. วนลูปสร้างข้อมูลสำหรับ Export
     // =========================================================
     const dataToExport = this.state.salesHistory.flatMap(sale =>
         sale.items.map(item => {
             
-            // 🔥 แก้ไขจุดที่เคย Error: พยายามหารหัสสินค้าจากหลายๆ ฟิลด์
-            const itemCode = item.productCode || item.id || item.code || item.productId;
+            // ✅ แก้ไขสำคัญ: ดึง productId เป็นอันดับแรก!
+            // (เพราะ item.id มักจะเป็น AutoID ของ Firestore ซึ่งไม่ตรงกับ Sheet)
+            const itemCode = item.productId || item.productCode || item.code || item.id;
             
-            // แปลงรหัสเป็น String เพื่อค้นหาใน Map
+            // ค้นหาใน Map
             const searchKey = itemCode ? String(itemCode).trim() : null;
             const product = searchKey ? productMap.get(searchKey) : null;
 
-            // คำนวณมูลค่ารวมของรายการนี้ (Quantity x Price)
             const totalItemValue = item.price * item.quantity;
-
-            // ตัวแปรสำหรับเก็บค่าที่จะ Export (ตั้งค่าเริ่มต้นเป็นค่าเดิม)
             let exportUnit = item.unit;
             let exportQty = item.quantity;
-            let costPerUnitVal = 0; // ค่าเริ่มต้น
+            let costPerUnitVal = 0;
 
             // --- LOGIC การแปลงหน่วย ---
             if (!product) {
-                // กรณีไม่เจอสินค้าใน Sheet (หรือรหัสไม่ตรง)
-if (itemCode) {
-    console.warn(`⚠️ ไม่พบข้อมูลสินค้า Code: "${itemCode}"`);
-    console.log("👉 ลองดูข้อมูลใน item นี้ครับ:", item); 
-} 
+                // กรณีไม่เจอ (Log เตือนเพื่อตรวจสอบ)
+                if (itemCode) console.warn(`⚠️ ไม่พบข้อมูลรหัส: "${itemCode}" (ชื่อ: ${item.productName || item.name}) ใน Sheet`);
             } else {
                 if (product.specialUnit) {
-                    // ✅ กรณี A: มีหน่วยพิเศษ (เช่น กาแฟซอง)
-                    // สูตร: จำนวนขาย (Base) / Factor (เช่น 2 กล่อง / 0.0833 = 24 ซอง)
+                    // ✅ เจอสินค้า + มีหน่วยพิเศษ -> แปลงหน่วย
                     const convertedQty = item.quantity / product.specialUnit.conversionFactor;
                     
-                    exportQty = Math.round(convertedQty); // ปัดเศษให้เป็นจำนวนเต็ม
+                    exportQty = Math.round(convertedQty); 
                     exportUnit = product.specialUnit.unitName;
                     costPerUnitVal = product.specialUnit.cost;
 
                 } else {
-                    // ✅ กรณี B: สินค้าทั่วไป (ใช้น้ำเปล่า, ขนม)
+                    // ✅ เจอสินค้า + ไม่มีหน่วยพิเศษ -> ใช้หน่วย Base
                     exportUnit = product.baseUnit;
                     costPerUnitVal = product.baseCost;
                 }
             }
 
-            // คำนวณราคาขายต่อหน่วยใหม่ (เพื่อให้คูณจำนวนแล้วได้ยอดยวมเท่าเดิม)
             const pricePerUnitVal = exportQty > 0 ? (totalItemValue / exportQty) : 0;
 
-            // คืนค่า Object แถว Excel
             return {
                 'รหัสการขาย': sale.id,
                 'วันที่': new Date(sale.timestamp).toLocaleDateString('th-TH'),
@@ -4010,7 +4039,6 @@ if (itemCode) {
                 'รหัสสินค้า': itemCode || 'N/A',
                 'ชื่อสินค้า': product ? product.productName : (item.productName || item.name),
                 
-                // ข้อมูลที่ผ่านการแปลงหน่วยแล้ว
                 'หน่วย': exportUnit,
                 'จำนวน': exportQty, 
                 'ราคาต่อหน่วย': pricePerUnitVal.toFixed(4),
@@ -4022,7 +4050,7 @@ if (itemCode) {
     );
 
     // =========================================================
-    // 5. เขียนไฟล์ Excel
+    // 4. เขียนไฟล์ Excel
     // =========================================================
     const worksheet = XLSX.utils.json_to_sheet(dataToExport);
     const workbook = XLSX.utils.book_new();
@@ -4566,6 +4594,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
 
