@@ -3886,52 +3886,55 @@ async generateSaleId() {
 }
 ,
 async exportToExcel() {
-    console.log("🚀 เริ่มต้น Export...");
+    console.log("🚀 เริ่มต้นกระบวนการ Export Excel...");
 
-    // 1. Load Data
+    // =========================================================
+    // 1. โหลดข้อมูลสินค้า (Master Data) จาก Google Sheets
+    // =========================================================
     let sheetRows = [];
     try {
         const res = await fetch(this.config.googleSheetUrl + '?t=' + Date.now());
         const json = await res.json();
         sheetRows = json.data || json;
-        console.log(`✅ โหลดข้อมูล Sheet สำเร็จ: ${sheetRows.length} แถว`);
+        console.log(`✅ โหลดข้อมูล Sheet สำเร็จ: ${sheetRows.length} รายการ`);
     } catch (e) {
         console.error("❌ โหลด Sheet ไม่ได้:", e);
         this.showInfoModal("ผิดพลาด", "ไม่สามารถโหลดข้อมูลสินค้าจาก Google Sheets", true);
         return;
     }
 
-    // 2. Build Map & Debug
+    // =========================================================
+    // 2. สร้าง Map เพื่อจับคู่รหัสสินค้ากับข้อมูลหน่วยพิเศษ
+    // =========================================================
     const productMap = new Map();
+
     sheetRows.forEach((row, index) => {
         const code = row['รหัสสินค้า'];
-        if (!code) return;
+        if (!code) return; // ข้ามแถวที่ไม่มีรหัส
 
-        // --- DEBUG ZONE: เช็คว่าอ่านค่าเจอไหม ---
-        // จะแสดง Log เฉพาะสินค้า 5 ตัวแรกที่มีหน่วยพิเศษ เพื่อไม่ให้รกเกินไป
-        if (row['หน่วยพิเศษ'] && row['ตัวคูณ']) {
-             console.log(`🔎 แถวที่ ${index+1} [${code}]: เจอหน่วยพิเศษ='${row['หน่วยพิเศษ']}', ตัวคูณ='${row['ตัวคูณ']}'`);
-        }
-        // -------------------------------------
-
+        // เตรียมข้อมูลพื้นฐาน
         const baseUnit = row['หน่วย'] ? String(row['หน่วย']).trim() : 'ชิ้น';
         const baseCost = parseFloat(row['ต้นทุน']) || 0;
 
+        // ตรวจสอบและเตรียมข้อมูล "หน่วยพิเศษ"
         let specialUnit = null;
         if (row['หน่วยพิเศษ'] && row['ตัวคูณ']) {
-            const qtyMultiplier = parseFloat(row['ตัวคูณ']);
-            if (qtyMultiplier > 0) {
+            const qtyMultiplier = parseFloat(row['ตัวคูณ']); // เช่น 12
+            const unitName = String(row['หน่วยพิเศษ']).trim(); // เช่น "ซอง"
+
+            if (qtyMultiplier > 0 && unitName) {
                 specialUnit = {
-                    unitName: String(row['หน่วยพิเศษ']).trim(),
-                    conversionFactor: 1 / qtyMultiplier,
+                    unitName: unitName,
+                    // Logic: Factor ในระบบ = 1 / ตัวคูณในชีท
+                    conversionFactor: 1 / qtyMultiplier, 
+                    // ต้นทุนเฉลี่ยต่อหน่วยย่อย
                     cost: +(baseCost / qtyMultiplier)
                 };
-            } else {
-                console.warn(`⚠️ [${code}] ตัวคูณเป็น 0 หรือไม่ใช่ตัวเลข`);
             }
         }
 
-        productMap.set(String(code), {
+        // บันทึกลง Map โดยใช้รหัสสินค้าเป็นกุญแจ (แปลงเป็น String เพื่อความชัวร์)
+        productMap.set(String(code).trim(), {
             productName: row['ชื่อการค้า'],
             baseUnit,
             baseCost,
@@ -3939,42 +3942,60 @@ async exportToExcel() {
         });
     });
 
+    // =========================================================
+    // 3. ตรวจสอบข้อมูลการขายก่อนประมวลผล
+    // =========================================================
     if (!this.state.salesHistory || this.state.salesHistory.length === 0) {
         this.showInfoModal("ไม่มีข้อมูล", "ไม่มีข้อมูลประวัติการขายให้ Export", false);
         return;
     }
 
-    // 3. Process Data
+    // =========================================================
+    // 4. วนลูปสร้างข้อมูลสำหรับ Export (หัวใจสำคัญ)
+    // =========================================================
     const dataToExport = this.state.salesHistory.flatMap(sale =>
         sale.items.map(item => {
-            const product = productMap.get(String(item.productCode));
+            
+            // 🔥 แก้ไขจุดที่เคย Error: พยายามหารหัสสินค้าจากหลายๆ ฟิลด์
+            const itemCode = item.productCode || item.id || item.code || item.productId;
+            
+            // แปลงรหัสเป็น String เพื่อค้นหาใน Map
+            const searchKey = itemCode ? String(itemCode).trim() : null;
+            const product = searchKey ? productMap.get(searchKey) : null;
+
+            // คำนวณมูลค่ารวมของรายการนี้ (Quantity x Price)
             const totalItemValue = item.price * item.quantity;
 
+            // ตัวแปรสำหรับเก็บค่าที่จะ Export (ตั้งค่าเริ่มต้นเป็นค่าเดิม)
             let exportUnit = item.unit;
             let exportQty = item.quantity;
-            let costPerUnitVal = 0;
+            let costPerUnitVal = 0; // ค่าเริ่มต้น
 
-            // --- DEBUG ZONE: เช็คตอนจับคู่ ---
+            // --- LOGIC การแปลงหน่วย ---
             if (!product) {
-                console.warn(`❌ ไม่พบข้อมูลสินค้า Code: ${item.productCode} ใน Sheet (หรือรหัสไม่ตรงกัน)`);
-            } else if (product.specialUnit) {
-                // เจอหน่วยพิเศษแล้ว
-                const convertedQty = item.quantity / product.specialUnit.conversionFactor;
-                exportQty = Math.round(convertedQty);
-                exportUnit = product.specialUnit.unitName;
-                costPerUnitVal = product.specialUnit.cost;
-                
-                // console.log(`✅ แปลงหน่วยสำเร็จ [${item.productCode}]: ${item.quantity} -> ${exportQty} ${exportUnit}`);
+                // กรณีไม่เจอสินค้าใน Sheet (หรือรหัสไม่ตรง)
+                if (itemCode) console.warn(`⚠️ ไม่พบข้อมูลสินค้า Code: "${itemCode}" ใน Google Sheet`);
             } else {
-                // ไม่เจอหน่วยพิเศษ
-               // console.log(`ℹ️ [${item.productCode}] ใช้หน่วยปกติ (ไม่มีหน่วยพิเศษตั้งค่าไว้)`);
-                exportUnit = product.baseUnit;
-                costPerUnitVal = product.baseCost;
-            }
-            // --------------------------------
+                if (product.specialUnit) {
+                    // ✅ กรณี A: มีหน่วยพิเศษ (เช่น กาแฟซอง)
+                    // สูตร: จำนวนขาย (Base) / Factor (เช่น 2 กล่อง / 0.0833 = 24 ซอง)
+                    const convertedQty = item.quantity / product.specialUnit.conversionFactor;
+                    
+                    exportQty = Math.round(convertedQty); // ปัดเศษให้เป็นจำนวนเต็ม
+                    exportUnit = product.specialUnit.unitName;
+                    costPerUnitVal = product.specialUnit.cost;
 
+                } else {
+                    // ✅ กรณี B: สินค้าทั่วไป (ใช้น้ำเปล่า, ขนม)
+                    exportUnit = product.baseUnit;
+                    costPerUnitVal = product.baseCost;
+                }
+            }
+
+            // คำนวณราคาขายต่อหน่วยใหม่ (เพื่อให้คูณจำนวนแล้วได้ยอดยวมเท่าเดิม)
             const pricePerUnitVal = exportQty > 0 ? (totalItemValue / exportQty) : 0;
 
+            // คืนค่า Object แถว Excel
             return {
                 'รหัสการขาย': sale.id,
                 'วันที่': new Date(sale.timestamp).toLocaleDateString('th-TH'),
@@ -3982,24 +4003,32 @@ async exportToExcel() {
                 'ยอดรวมก่อนลด': sale.subtotal?.toFixed(2) || '0.00',
                 'ส่วนลด': sale.discount?.toFixed(2) || '0.00',
                 'ยอดสุทธิ': sale.total?.toFixed(2) || '0.00',
-                'รหัสสินค้า': item.productCode || '',
-                'สินค้า': item.productName || item.name,
+                
+                'รหัสสินค้า': itemCode || 'N/A',
+                'ชื่อสินค้า': product ? product.productName : (item.productName || item.name),
+                
+                // ข้อมูลที่ผ่านการแปลงหน่วยแล้ว
                 'หน่วย': exportUnit,
-                'จำนวน': exportQty,
-                'มูลค่ารวม (รายการนี้)': totalItemValue.toFixed(2),
+                'จำนวน': exportQty, 
                 'ราคาต่อหน่วย': pricePerUnitVal.toFixed(4),
-                'ต้นทุนต่อหน่วย': costPerUnitVal.toFixed(4)
+                'ต้นทุนต่อหน่วย': costPerUnitVal.toFixed(4),
+                
+                'มูลค่ารวม (รายการนี้)': totalItemValue.toFixed(2)
             };
         })
     );
 
-    // 4. Excel Generation
+    // =========================================================
+    // 5. เขียนไฟล์ Excel
+    // =========================================================
     const worksheet = XLSX.utils.json_to_sheet(dataToExport);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'ประวัติการขาย');
-    XLSX.writeFile(workbook, `Sales_History_Debug_${new Date().toISOString().split('T')[0]}.xlsx`);
+
+    const fileName = `Sales_Export_${new Date().toISOString().split('T')[0]}.xlsx`;
+    XLSX.writeFile(workbook, fileName);
     
-    console.log("🎉 Export เสร็จสิ้น");
+    console.log(`🎉 Export สำเร็จ: ${fileName}`);
 },
     async loadReceiptSettings() {
         const { api } = window.firebaseServices;
@@ -4534,6 +4563,7 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 </script>
+
 
 
 
